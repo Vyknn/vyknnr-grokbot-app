@@ -119,7 +119,10 @@ pub fn hermes_snippet(mcp_url: &str, mcp_key: &str, allowed: &[String], api_base
         .join("\n");
     format!(
         "# 1) ~/.hermes/config.yaml : ให้ Hermes ต่อ MCP server ของแอปนี้ (toolset จะชื่อ mcp-assistant)\n\
-mcp_servers:\n  assistant:\n    url: \"{mcp_url}\"\n    headers:\n      Authorization: \"Bearer {mcp_key}\"\n\n\
+#    timeout (วินาที) ต้องไม่น้อยกว่า 450 เพราะคำสั่งอาจรอผู้ใช้อนุมัติได้ 300 วินาทีและรันได้อีก 120 วินาที\n\
+#    หมายเหตุ: ระหว่างที่แอปกำลังให้ Hermes ตอบแชตใดอยู่ ทุก session ของ Hermes ที่เรียก MCP server นี้\n\
+#    (รวมถึง session อื่นที่คุณเปิดเอง) จะถูกผูกกับแชตนั้น คำสั่งจะรันในโฟลเดอร์ของแชตนั้นและขึ้นในแชตนั้น\n\
+mcp_servers:\n  assistant:\n    url: \"{mcp_url}\"\n    headers:\n      Authorization: \"Bearer {mcp_key}\"\n    timeout: 450\n\n\
 # 2) ~/.hermes/config.yaml : ปิด toolset ที่รันคำสั่งหรือแตะไฟล์เอง\n\
 #    (ทุกตัวที่ไม่อยู่ในรายการอนุญาตของแอป หรือใช้ `hermes tools` ปิดทีละตัว)\n\
 agent:\n  disabled_toolsets:\n{list}\n\n\
@@ -210,6 +213,9 @@ mod tests {
             s.contains("mcp_servers:\n  assistant:\n    url: \"http://127.0.0.1:8765/mcp/hermes\"")
         );
         assert!(s.contains("Authorization: \"Bearer abc123\""));
+        // Tool calls may wait 300 s for approval and run 120 s.
+        assert!(s.contains("      Authorization: \"Bearer abc123\"\n    timeout: 450\n"));
+        assert!(s.contains("ทุก session ของ Hermes"));
         assert!(s.contains("    - terminal"));
         assert!(!s.contains("    - web\n"));
         assert!(s.contains("API_SERVER_ENABLED=true"));
