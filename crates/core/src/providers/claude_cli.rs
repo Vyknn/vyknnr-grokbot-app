@@ -33,6 +33,19 @@ const SETTINGS_JSON: &str = r#"{"disableAllHooks":true}"#;
 
 /// CLI arguments for one turn. Never adds a permission-mode or
 /// permission-bypass flag.
+/// From `claude` candidates in PATH order, prefer a real `.exe` over a
+/// `.cmd`/`.ps1` shim (a shim goes through cmd.exe, whose argument quoting
+/// differs); otherwise the first one.
+pub fn pick_claude_exe(found: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    let found: Vec<PathBuf> = found.into_iter().collect();
+    let is_exe = |p: &PathBuf| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"));
+    found
+        .iter()
+        .find(|p| is_exe(p))
+        .or_else(|| found.first())
+        .cloned()
+}
+
 pub fn build_args(mcp_config_path: &Path, model: Option<&str>) -> Vec<String> {
     let mut a: Vec<String> = [
         "-p",
@@ -41,6 +54,7 @@ pub fn build_args(mcp_config_path: &Path, model: Option<&str>) -> Vec<String> {
         "--verbose",
         "--include-partial-messages",
         "--no-session-persistence",
+        "--disable-slash-commands",
         "--setting-sources",
         "",
         "--settings",
@@ -118,9 +132,8 @@ impl ClaudeCliProvider {
 
     /// Locate `claude` on PATH.
     pub fn from_path(mcp: McpServerHandle, model: Option<String>) -> Option<Self> {
-        which::which("claude")
-            .ok()
-            .map(|exe| Self::new(exe, mcp, model))
+        let found = which::which_all("claude").ok()?;
+        pick_claude_exe(found).map(|exe| Self::new(exe, mcp, model))
     }
 
     fn write_config(&self, token: &str) -> std::io::Result<TempPath> {

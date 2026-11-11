@@ -5,7 +5,9 @@ use assistant_core::command_service::{
 use assistant_core::decision::gate::{CommandCheck, CommandChecker};
 use assistant_core::decision::policy::{CommandVerdict, DecisionSource};
 use assistant_core::mcp_server::{McpServer, McpServerHandle};
-use assistant_core::providers::claude_cli::{build_args, parse_stream_line, ClaudeCliProvider};
+use assistant_core::providers::claude_cli::{
+    build_args, parse_stream_line, pick_claude_exe, ClaudeCliProvider,
+};
 use assistant_core::providers::{ChatProvider, ProviderTurn};
 use assistant_core::runner::RunLimits;
 use assistant_core::store::Store;
@@ -25,6 +27,7 @@ fn args_disable_builtin_tools_and_allow_only_our_mcp() {
         "-p",
         "--strict-mcp-config",
         "--no-session-persistence",
+        "--disable-slash-commands",
         "--allowedTools",
         "mcp__assistant__run_command",
     ] {
@@ -56,6 +59,7 @@ fn args_exact_order_and_model() {
         "--verbose",
         "--include-partial-messages",
         "--no-session-persistence",
+        "--disable-slash-commands",
         "--setting-sources",
         "",
         "--settings",
@@ -76,6 +80,28 @@ fn args_exact_order_and_model() {
     .map(|s| s.to_string())
     .collect();
     assert_eq!(a, expected);
+}
+
+#[test]
+fn prefers_claude_exe_over_cmd_shim() {
+    let p = |v: &[&str]| pick_claude_exe(v.iter().map(PathBuf::from));
+    assert_eq!(
+        p(&["C:\\npm\\claude.cmd", "C:\\bin\\claude.exe"]),
+        Some(PathBuf::from("C:\\bin\\claude.exe"))
+    );
+    assert_eq!(
+        p(&["C:\\npm\\claude.cmd", "C:\\bin\\CLAUDE.EXE"]),
+        Some(PathBuf::from("C:\\bin\\CLAUDE.EXE"))
+    );
+    assert_eq!(
+        p(&["C:\\npm\\claude.cmd"]),
+        Some(PathBuf::from("C:\\npm\\claude.cmd"))
+    );
+    assert_eq!(
+        p(&["C:\\a\\claude.exe", "C:\\b\\claude.exe"]),
+        Some(PathBuf::from("C:\\a\\claude.exe"))
+    );
+    assert_eq!(p(&[]), None);
 }
 
 fn parse_all(s: &str) -> Vec<ChatEvent> {
@@ -186,11 +212,11 @@ fn req(cwd: &Path) -> TurnRequest {
 }
 
 /// Writes `fake_claude.cmd` into `dir`. The script records stdin and the
-/// `--mcp-config` path (argument 13; four `shift`s make it `%9`), then runs `body`.
+/// `--mcp-config` path (argument 14; five `shift`s make it `%9`), then runs `body`.
 fn fake(dir: &Path, body: &str) -> PathBuf {
     let p = dir.join("fake_claude.cmd");
     let script = format!(
-        "@echo off\r\nfindstr \"^\" > \"{d}\\stdin.txt\"\r\nshift\r\nshift\r\nshift\r\nshift\r\necho %~9> \"{d}\\cfgpath.txt\"\r\n{body}\r\n",
+        "@echo off\r\nfindstr \"^\" > \"{d}\\stdin.txt\"\r\nshift\r\nshift\r\nshift\r\nshift\r\nshift\r\necho %~9> \"{d}\\cfgpath.txt\"\r\n{body}\r\n",
         d = dir.display()
     );
     std::fs::write(&p, script).unwrap();
