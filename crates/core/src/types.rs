@@ -93,7 +93,11 @@ mod tests {
 
     #[test]
     fn provider_id_round_trips_as_snake_case() {
-        for (p, s) in [(ProviderId::Hermes,"hermes"),(ProviderId::ClaudeCli,"claude_cli"),(ProviderId::Api,"api")] {
+        for (p, s) in [
+            (ProviderId::Hermes, "hermes"),
+            (ProviderId::ClaudeCli, "claude_cli"),
+            (ProviderId::Api, "api"),
+        ] {
             assert_eq!(p.as_str(), s);
             assert_eq!(s.parse::<ProviderId>().unwrap(), p);
             assert_eq!(serde_json::to_string(&p).unwrap(), format!("\"{s}\""));
