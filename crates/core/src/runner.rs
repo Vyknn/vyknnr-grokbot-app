@@ -26,7 +26,8 @@ impl Default for RunLimits {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RunChunk {
     Stdout(String),
     Stderr(String),
