@@ -4,7 +4,7 @@
 //! user (timeout, dropped channel, cancel) is treated as Deny.
 
 use crate::decision::gate::{CommandCheck, CommandChecker};
-use crate::decision::policy::CommandVerdict;
+use crate::decision::policy::{CommandVerdict, DecisionSource};
 use crate::runner::{run_powershell, RunChunk, RunLimits, RunResult};
 use crate::store::{Approval, Store};
 use crate::ProviderId;
@@ -82,6 +82,24 @@ pub enum AppEvent {
     CommandDenied {
         conversation_id: i64,
         command: String,
+    },
+    RouteDecided {
+        conversation_id: i64,
+        provider: ProviderId,
+        source: DecisionSource,
+        probability: Option<f64>,
+    },
+    AssistantDelta {
+        conversation_id: i64,
+        text: String,
+    },
+    TurnFinished {
+        conversation_id: i64,
+    },
+    TurnFailed {
+        conversation_id: i64,
+        provider: ProviderId,
+        error: String,
     },
 }
 
