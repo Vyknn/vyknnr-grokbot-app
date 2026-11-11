@@ -36,7 +36,9 @@ impl CommandChecker for FakeChecker {
             is_safe: Some(0.5),
             risk: Some("other".into()),
             risk_p: Some(0.5),
-            source: DecisionSource::Manual,
+            source: DecisionSource::Jev {
+                model: "fake-jev".into(),
+            },
         }
     }
 }
@@ -320,7 +322,9 @@ async fn limit_reached_asks_even_if_auto() {
     ));
     let recs = r.store.commands(r.conv).unwrap();
     assert_eq!(recs.len(), 3);
-    assert!(recs.iter().all(|x| x.approval == Approval::Auto));
+    assert_eq!(recs[0].approval, Approval::Auto);
+    assert_eq!(recs[1].approval, Approval::Auto);
+    assert_eq!(recs[2].approval, Approval::User);
 }
 
 #[tokio::test]
@@ -333,34 +337,158 @@ async fn limit_deny_returns_denied() {
     let c = ctx(r.conv, 0);
     let out = r.svc.execute(&c, "Write-Output ok").await;
     assert!(matches!(out, CommandOutcome::Denied));
-    assert!(r.checker.seen.lock().unwrap().is_empty());
+    assert_eq!(*r.checker.seen.lock().unwrap(), vec!["Write-Output ok"]);
+    let recs = r.store.commands(r.conv).unwrap();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].approval, Approval::Denied);
+    assert_eq!(recs[0].check["source"]["kind"], "jev");
+}
+
+#[tokio::test]
+async fn limit_then_run_asks_once_with_real_check() {
+    let r = rig(
+        CommandVerdict::AskUser,
+        vec![Script::Answer(ApprovalResponse::Run)],
+        T,
+    );
+    let out = r.svc.execute(&ctx(r.conv, 0), "Write-Output ok").await;
+    assert!(matches!(out, CommandOutcome::Ran { .. }));
+    let reqs = r.approver.reqs();
+    assert_eq!(reqs.len(), 1);
+    assert!(matches!(
+        reqs[0].reason,
+        ApprovalReason::LimitReached { count: 1 }
+    ));
+    assert_eq!(reqs[0].check.verdict, CommandVerdict::AskUser);
+    let recs = r.store.commands(r.conv).unwrap();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].approval, Approval::User);
+}
+
+#[tokio::test]
+async fn limit_request_carries_gate_source() {
+    let r = rig(
+        CommandVerdict::AutoRun,
+        vec![Script::Answer(ApprovalResponse::Deny)],
+        T,
+    );
+    r.svc.execute(&ctx(r.conv, 0), "Write-Output ok").await;
+    let req = &r.approver.reqs()[0];
+    assert_eq!(
+        req.check.source,
+        DecisionSource::Jev {
+            model: "fake-jev".into()
+        }
+    );
+    assert_eq!(req.check.verdict, CommandVerdict::AutoRun);
+}
+
+#[tokio::test]
+async fn limit_edit_with_auto_gate_is_user_edited() {
+    let r = rig(
+        CommandVerdict::AutoRun,
+        vec![Script::Answer(ApprovalResponse::RunEdited(
+            "Write-Output edited".into(),
+        ))],
+        T,
+    );
+    let out = r.svc.execute(&ctx(r.conv, 0), "Write-Output orig").await;
+    let CommandOutcome::Ran { result, .. } = out else {
+        panic!("expected Ran");
+    };
+    assert!(result.output.contains("edited"));
+    let reqs = r.approver.reqs();
+    assert_eq!(reqs.len(), 1);
+    assert!(matches!(
+        reqs[0].reason,
+        ApprovalReason::LimitReached { count: 1 }
+    ));
+    assert_eq!(reqs[0].command, "Write-Output orig");
+    assert_eq!(reqs[0].check.verdict, CommandVerdict::AutoRun);
+    assert_eq!(
+        *r.checker.seen.lock().unwrap(),
+        vec!["Write-Output orig", "Write-Output edited"]
+    );
+    let recs = r.store.commands(r.conv).unwrap();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].approval, Approval::UserEdited);
+    assert_eq!(recs[0].command, "Write-Output edited");
+}
+
+#[tokio::test]
+async fn cancel_between_authorize_and_execute_never_starts() {
+    let r = rig(CommandVerdict::AutoRun, vec![], T);
+    let c = ctx(r.conv, 10);
+    let auth = r.svc.authorize(&c, "Write-Output ok").await;
+    assert!(matches!(auth, Authorization::Approved { .. }));
+    c.cancel.cancel();
+    let out = r.svc.execute(&c, "Write-Output ok").await;
+    assert!(matches!(out, CommandOutcome::Denied));
+    assert!(!r
+        .sink
+        .events()
+        .iter()
+        .any(|e| matches!(e, AppEvent::CommandStarted { .. })));
     let recs = r.store.commands(r.conv).unwrap();
     assert_eq!(recs.len(), 1);
     assert_eq!(recs[0].approval, Approval::Denied);
 }
 
 #[tokio::test]
-async fn limit_then_run_still_needs_review() {
-    let r = rig(
-        CommandVerdict::AskUser,
-        vec![
-            Script::Answer(ApprovalResponse::Run),
-            Script::Answer(ApprovalResponse::Run),
-        ],
+async fn edit_then_cancel_records_edited_text() {
+    // Turn is cancelled while the gate re-checks the user's edit.
+    struct CancelOnRecheck {
+        calls: Mutex<u32>,
+        cancel: CancellationToken,
+    }
+    #[async_trait]
+    impl CommandChecker for CancelOnRecheck {
+        async fn check(&self, command: &str, _cwd: &Path) -> CommandCheck {
+            let mut n = self.calls.lock().unwrap();
+            *n += 1;
+            if *n == 2 {
+                self.cancel.cancel();
+            }
+            CommandCheck {
+                verdict: CommandVerdict::AskUser,
+                is_safe: None,
+                risk: Some(command.to_string()),
+                risk_p: None,
+                source: DecisionSource::Manual,
+            }
+        }
+    }
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let conv = store
+        .create_conversation("t", &std::env::temp_dir())
+        .unwrap()
+        .id;
+    let c = ctx(conv, 10);
+    let sink = Arc::new(VecSink::default());
+    let svc = CommandService::new(
+        Arc::new(CancelOnRecheck {
+            calls: Mutex::new(0),
+            cancel: c.cancel.clone(),
+        }),
+        ScriptedApprover::new(vec![Script::Answer(ApprovalResponse::RunEdited(
+            "Write-Output edited".into(),
+        ))]),
+        store.clone(),
+        sink.clone(),
+        RunLimits::default(),
         T,
     );
-    let out = r.svc.execute(&ctx(r.conv, 0), "Write-Output ok").await;
-    assert!(matches!(out, CommandOutcome::Ran { .. }));
-    let reqs = r.approver.reqs();
-    assert_eq!(reqs.len(), 2);
-    assert!(matches!(
-        reqs[0].reason,
-        ApprovalReason::LimitReached { count: 1 }
-    ));
-    assert!(matches!(reqs[1].reason, ApprovalReason::NeedsReview));
-    let recs = r.store.commands(r.conv).unwrap();
+    let out = svc.execute(&c, "Write-Output orig").await;
+    assert!(matches!(out, CommandOutcome::Denied));
+    let recs = store.commands(conv).unwrap();
     assert_eq!(recs.len(), 1);
-    assert_eq!(recs[0].approval, Approval::User);
+    assert_eq!(recs[0].approval, Approval::Denied);
+    assert_eq!(recs[0].command, "Write-Output edited");
+    assert_eq!(recs[0].check["risk"], "Write-Output edited");
+    assert!(!sink
+        .events()
+        .iter()
+        .any(|e| matches!(e, AppEvent::CommandStarted { .. })));
 }
 
 #[tokio::test]

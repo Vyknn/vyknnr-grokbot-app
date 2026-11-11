@@ -4,7 +4,7 @@
 //! user (timeout, dropped channel, cancel) is treated as Deny.
 
 use crate::decision::gate::{CommandCheck, CommandChecker};
-use crate::decision::policy::{CommandVerdict, DecisionSource};
+use crate::decision::policy::CommandVerdict;
 use crate::runner::{run_powershell, RunChunk, RunLimits, RunResult};
 use crate::store::{Approval, Store};
 use crate::ProviderId;
@@ -114,18 +114,7 @@ pub struct CommandService {
     approval_timeout: Duration,
 }
 
-/// Placeholder check used when a request is made before the gate has run.
-fn not_checked() -> CommandCheck {
-    CommandCheck {
-        verdict: CommandVerdict::AskUser,
-        is_safe: None,
-        risk: None,
-        risk_p: None,
-        source: DecisionSource::Fallback {
-            reason: "not_checked".into(),
-        },
-    }
-}
+const CANCELLED_BEFORE_RUN: &str = "(ยกเลิกก่อนเริ่มรัน)";
 
 impl CommandService {
     pub fn new(
@@ -174,17 +163,18 @@ impl CommandService {
         }
     }
 
-    fn deny(
+    /// Record a denied command and emit `CommandDenied`. Returns the record id.
+    fn record_denied(
         &self,
         ctx: &CommandContext,
         command: &str,
         check: Option<&CommandCheck>,
-    ) -> Authorization {
+    ) -> Option<i64> {
         let check_json = check
             .and_then(|c| serde_json::to_value(c).ok())
             .unwrap_or(serde_json::Value::Null);
         // Recording failure must not turn a Deny into anything else.
-        let _ = self.store.insert_command(
+        let id = self.store.insert_command(
             ctx.conversation_id,
             command,
             &ctx.cwd,
@@ -195,7 +185,46 @@ impl CommandService {
             conversation_id: ctx.conversation_id,
             command: command.to_string(),
         });
+        id.ok()
+    }
+
+    fn deny(
+        &self,
+        ctx: &CommandContext,
+        command: &str,
+        check: Option<&CommandCheck>,
+    ) -> Authorization {
+        self.record_denied(ctx, command, check);
         Authorization::Denied
+    }
+
+    /// Turn the user's answer into an authorization. `Run` approves `command`
+    /// with `check` as `Approval::User`; a non-blank edit is re-checked by the
+    /// gate and approved as `Approval::UserEdited` without asking again.
+    /// Anything else (deny, blank edit, timeout, cancel) is Denied.
+    async fn resolve(
+        &self,
+        ctx: &CommandContext,
+        command: String,
+        check: CommandCheck,
+        resp: ApprovalResponse,
+    ) -> Authorization {
+        let (command, approval, check) = match resp {
+            ApprovalResponse::Run => (command, Approval::User, check),
+            ApprovalResponse::RunEdited(edited) if !edited.trim().is_empty() => {
+                let new_check = self.gate.check(&edited, &ctx.cwd).await;
+                (edited, Approval::UserEdited, new_check)
+            }
+            _ => return self.deny(ctx, &command, Some(&check)),
+        };
+        if ctx.cancel.is_cancelled() {
+            return self.deny(ctx, &command, Some(&check));
+        }
+        Authorization::Approved {
+            command,
+            approval,
+            check,
+        }
     }
 
     /// Decide whether `command` may run.
@@ -209,53 +238,27 @@ impl CommandService {
         if ctx.cancel.is_cancelled() {
             return self.deny(ctx, command, None);
         }
-        let mut command = command.to_string();
-
         let count = ctx.count.fetch_add(1, Ordering::SeqCst).saturating_add(1);
-        if count > ctx.max_per_turn {
-            let reason = ApprovalReason::LimitReached { count };
-            match self.ask(ctx, &command, &not_checked(), reason).await {
-                ApprovalResponse::Run => {}
-                ApprovalResponse::RunEdited(c) if !c.trim().is_empty() => command = c,
-                _ => return self.deny(ctx, &command, None),
-            }
+        let check = self.gate.check(command, &ctx.cwd).await;
+        if ctx.cancel.is_cancelled() {
+            return self.deny(ctx, command, Some(&check));
         }
 
-        let check = self.gate.check(&command, &ctx.cwd).await;
-        if ctx.cancel.is_cancelled() {
-            return self.deny(ctx, &command, Some(&check));
-        }
-        if check.verdict == CommandVerdict::AutoRun {
+        // Over the per-turn limit: one question carrying the real check,
+        // even if the gate would auto-run it.
+        let reason = if count > ctx.max_per_turn {
+            ApprovalReason::LimitReached { count }
+        } else if check.verdict == CommandVerdict::AutoRun {
             return Authorization::Approved {
-                command,
+                command: command.to_string(),
                 approval: Approval::Auto,
                 check,
             };
-        }
-
-        let resp = self
-            .ask(ctx, &command, &check, ApprovalReason::NeedsReview)
-            .await;
-        let auth = match resp {
-            ApprovalResponse::Run => Authorization::Approved {
-                command: command.clone(),
-                approval: Approval::User,
-                check: check.clone(),
-            },
-            ApprovalResponse::RunEdited(edited) if !edited.trim().is_empty() => {
-                let new_check = self.gate.check(&edited, &ctx.cwd).await;
-                Authorization::Approved {
-                    command: edited,
-                    approval: Approval::UserEdited,
-                    check: new_check,
-                }
-            }
-            _ => return self.deny(ctx, &command, Some(&check)),
+        } else {
+            ApprovalReason::NeedsReview
         };
-        if ctx.cancel.is_cancelled() {
-            return self.deny(ctx, &command, Some(&check));
-        }
-        auth
+        let resp = self.ask(ctx, command, &check, reason).await;
+        self.resolve(ctx, command.to_string(), check, resp).await
     }
 
     /// Authorize, run with PowerShell, and record the result.
@@ -268,6 +271,15 @@ impl CommandService {
             } => (command, approval, check),
             Authorization::Denied => return CommandOutcome::Denied,
         };
+        // Stop pressed after approval but before the run: never start it.
+        if ctx.cancel.is_cancelled() {
+            if let Some(id) = self.record_denied(ctx, &command, Some(&check)) {
+                let _ = self
+                    .store
+                    .finish_command(id, None, CANCELLED_BEFORE_RUN, false);
+            }
+            return CommandOutcome::Denied;
+        }
         let check_json = serde_json::to_value(&check).unwrap_or(serde_json::Value::Null);
         // No audit record means no run.
         let Ok(command_id) = self.store.insert_command(
