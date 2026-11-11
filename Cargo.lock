@@ -49,6 +49,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "indexmap",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",
