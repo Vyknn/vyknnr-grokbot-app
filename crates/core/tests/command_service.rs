@@ -156,7 +156,10 @@ const T: Duration = Duration::from_secs(300);
 async fn auto_run_does_not_ask() {
     let r = rig(CommandVerdict::AutoRun, vec![], T);
     let out = r.svc.execute(&ctx(r.conv, 10), "Write-Output ok").await;
-    let CommandOutcome::Ran { command_id, result } = out else {
+    let CommandOutcome::Ran {
+        command_id, result, ..
+    } = out
+    else {
         panic!("expected Ran");
     };
     assert_eq!(r.approver.calls(), 0);

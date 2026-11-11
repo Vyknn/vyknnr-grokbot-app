@@ -6,13 +6,11 @@
 //! [`CommandContext`], registers it with the MCP server for the life of the
 //! turn, and is the only place a turn is cancelled.
 
-use crate::command_service::{AppEvent, CommandContext, CommandOutcome, CommandService, EventSink};
+use crate::command_service::{AppEvent, CommandContext, CommandService, EventSink};
 use crate::decision::policy::{DecisionSource, RouteOutcome};
 use crate::decision::router::{ProviderProfile, Router};
-use crate::history::format_command_result;
-use crate::mcp_server::{choose_cwd, McpServerHandle, DENIED_TEXT};
+use crate::mcp_server::{choose_cwd, McpServerHandle};
 use crate::providers::{ChatProvider, ProviderTurn};
-use crate::runner::for_model;
 use crate::settings::Settings;
 use crate::store::{Conversation, DecisionKind, Store, StoreError};
 use crate::{Availability, ChatEvent, Message, NewMessage, ProviderId, Role, TurnRequest};
@@ -512,39 +510,7 @@ impl Orchestrator {
                 return Ok(None);
             }
         };
-        let (stored, for_model_text) = match outcome {
-            CommandOutcome::Ran { command_id, result } => {
-                // The user may have edited the command before approving it.
-                let actual = self
-                    .store
-                    .commands(ctx.conversation_id)
-                    .ok()
-                    .and_then(|v| v.into_iter().find(|c| c.id == command_id))
-                    .map(|c| c.command)
-                    .unwrap_or_else(|| command.to_string());
-                let text = for_model(&result, self.commands.limits().max_for_model);
-                let stored = format_command_result(
-                    ctx.provider,
-                    &cctx.cwd.to_string_lossy(),
-                    &actual,
-                    result.exit_code,
-                    &text,
-                );
-                (stored, text)
-            }
-            CommandOutcome::Denied => (
-                format!("[คำสั่งถูกปฏิเสธ] > {command}"),
-                DENIED_TEXT.to_string(),
-            ),
-        };
-        self.store.append_message(
-            ctx.conversation_id,
-            NewMessage {
-                role: Role::CommandResult,
-                provider: Some(ctx.provider),
-                content: stored,
-            },
-        )?;
+        let for_model_text = self.commands.add_result_to_chat(&cctx, command, &outcome)?;
         Ok(Some(for_model_text))
     }
 }

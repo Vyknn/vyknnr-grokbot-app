@@ -515,14 +515,19 @@ async fn handle_approval(
                     // the action, and a cancel/abort after that point must not
                     // leave it without an audit row.
                     commands.record_external(&ctx, &auth).await;
+                    let _ = commands.add_external_to_chat(&ctx, &command, &auth);
                     "once"
                 }
                 Authorization::Approved { .. } => {
                     // Hermes would run its original text, not the edit.
                     events.push(ChatEvent::TextDelta(EDITED_NOTE.into()));
+                    let _ = commands.add_external_to_chat(&ctx, &command, &Authorization::Denied);
                     "deny"
                 }
-                Authorization::Denied => "deny",
+                Authorization::Denied => {
+                    let _ = commands.add_external_to_chat(&ctx, &command, &auth);
+                    "deny"
+                }
             }
         }
     };

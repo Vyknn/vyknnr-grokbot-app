@@ -5,9 +5,10 @@
 
 use crate::decision::gate::{CommandCheck, CommandChecker};
 use crate::decision::policy::{CommandVerdict, DecisionSource};
-use crate::runner::{run_powershell, RunChunk, RunLimits, RunResult};
-use crate::store::{Approval, Store};
-use crate::ProviderId;
+use crate::history::{format_command_result, format_denied_command};
+use crate::runner::{for_model, run_powershell, RunChunk, RunLimits, RunResult};
+use crate::store::{Approval, Store, StoreError};
+use crate::{NewMessage, ProviderId, Role};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -18,6 +19,8 @@ use tokio_util::sync::CancellationToken;
 
 pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 const EXTERNAL_OUTPUT: &str = "(รันโดยโปรแกรมภายนอก)";
+/// What the model is told when a command is denied.
+pub const DENIED_TEXT: &str = "คำสั่งถูกปฏิเสธโดยผู้ใช้หรือระบบตรวจสอบ";
 
 #[derive(Debug, Clone)]
 pub struct CommandContext {
@@ -119,7 +122,12 @@ pub enum Authorization {
 
 #[derive(Debug, Clone)]
 pub enum CommandOutcome {
-    Ran { command_id: i64, result: RunResult },
+    /// `command` is what actually ran (the user may have edited it).
+    Ran {
+        command_id: i64,
+        command: String,
+        result: RunResult,
+    },
     Denied,
 }
 
@@ -359,7 +367,11 @@ impl CommandService {
             exit_code: result.exit_code,
             timed_out: result.timed_out,
         });
-        CommandOutcome::Ran { command_id, result }
+        CommandOutcome::Ran {
+            command_id,
+            command,
+            result,
+        }
     }
 
     /// Record an approved command that is run by an external program (e.g. Hermes).
@@ -388,5 +400,78 @@ impl CommandService {
             .finish_command(id, None, EXTERNAL_OUTPUT, false)
             .ok()?;
         Some(id)
+    }
+
+    /// Add a command's result to the conversation's chat history (as a
+    /// `CommandResult` message from `ctx.provider`) so every provider sees it
+    /// on later turns (spec 9.1), and return the text to give the model.
+    ///
+    /// `requested` is the command the model asked for; it is shown for a
+    /// denial. This and [`Self::add_external_to_chat`] are the only places
+    /// that write command entries into chat history.
+    pub fn add_result_to_chat(
+        &self,
+        ctx: &CommandContext,
+        requested: &str,
+        outcome: &CommandOutcome,
+    ) -> Result<String, StoreError> {
+        let text = self.text_for_model(outcome);
+        let content = match outcome {
+            CommandOutcome::Ran {
+                command, result, ..
+            } => format_command_result(
+                ctx.provider,
+                &ctx.cwd.to_string_lossy(),
+                command,
+                result.exit_code,
+                &text,
+            ),
+            CommandOutcome::Denied => format_denied_command(requested),
+        };
+        self.append_chat(ctx, content)?;
+        Ok(text)
+    }
+
+    /// What the model is told about `outcome`.
+    pub fn text_for_model(&self, outcome: &CommandOutcome) -> String {
+        match outcome {
+            CommandOutcome::Ran { result, .. } => for_model(result, self.limits.max_for_model),
+            CommandOutcome::Denied => DENIED_TEXT.to_string(),
+        }
+    }
+
+    /// Like [`Self::add_result_to_chat`] for a command an external program
+    /// runs after our approval (e.g. a Hermes `approval.request`): approved
+    /// commands get the external-run marker as output; denials the denied text.
+    pub fn add_external_to_chat(
+        &self,
+        ctx: &CommandContext,
+        requested: &str,
+        auth: &Authorization,
+    ) -> Result<(), StoreError> {
+        let content = match auth {
+            Authorization::Approved { command, .. } => format_command_result(
+                ctx.provider,
+                &ctx.cwd.to_string_lossy(),
+                command,
+                None,
+                EXTERNAL_OUTPUT,
+            ),
+            Authorization::Denied => format_denied_command(requested),
+        };
+        self.append_chat(ctx, content)
+    }
+
+    fn append_chat(&self, ctx: &CommandContext, content: String) -> Result<(), StoreError> {
+        self.store
+            .append_message(
+                ctx.conversation_id,
+                NewMessage {
+                    role: Role::CommandResult,
+                    provider: Some(ctx.provider),
+                    content,
+                },
+            )
+            .map(|_| ())
     }
 }

@@ -426,3 +426,37 @@ async fn cwd_inside_chat_folder_is_used() {
     assert_eq!(get_location(&r, "tok-sub", Some(&abs)).await, want);
     assert_eq!(get_location(&r, "tok-sub", Some("Sub")).await, want);
 }
+
+#[tokio::test]
+async fn ran_and_denied_calls_are_added_to_chat_history() {
+    use assistant_core::Role;
+    let r = rig(CommandVerdict::AutoRun).await;
+    let _g = r
+        .handle
+        .register_turn(ctx(r.conv, "tok-hist", r.dir.path().into()));
+    let c = client(r.handle.url_for_turn("tok-hist"), None).await;
+    call(&c, serde_json::json!({"command": "Write-Output hist-ok"})).await;
+    let _ = c.cancel().await;
+    let msgs = r.store.messages(r.conv).unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].role, Role::CommandResult);
+    assert_eq!(msgs[0].provider, Some(ProviderId::ClaudeCli));
+    assert!(msgs[0]
+        .content
+        .starts_with("[คำสั่งที่รันโดย claude_cli]\ncwd: "));
+    assert!(msgs[0]
+        .content
+        .contains("> Write-Output hist-ok\nexit: 0\nhist-ok"));
+
+    let r = rig(CommandVerdict::AskUser).await;
+    let _g = r
+        .handle
+        .register_turn(ctx(r.conv, "tok-hist2", r.dir.path().into()));
+    let c = client(r.handle.url_for_turn("tok-hist2"), None).await;
+    call(&c, serde_json::json!({"command": "Remove-Item x"})).await;
+    let _ = c.cancel().await;
+    let msgs = r.store.messages(r.conv).unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].role, Role::CommandResult);
+    assert_eq!(msgs[0].content, "[คำสั่งถูกปฏิเสธ] > Remove-Item x");
+}

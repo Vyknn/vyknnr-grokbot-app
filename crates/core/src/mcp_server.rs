@@ -13,7 +13,6 @@
 //! than `null` get 403 (DNS rebinding / browser protection).
 
 use crate::command_service::{CommandContext, CommandOutcome, CommandService};
-use crate::runner::for_model;
 use axum::body::Body;
 use axum::extract::{Path as UrlPath, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -35,7 +34,7 @@ use std::sync::{Arc, Mutex};
 use subtle::ConstantTimeEq;
 use tokio_util::sync::CancellationToken;
 
-pub const DENIED_TEXT: &str = "คำสั่งถูกปฏิเสธโดยผู้ใช้หรือระบบตรวจสอบ";
+pub use crate::command_service::DENIED_TEXT;
 pub const NO_ACTIVE_TURN_TEXT: &str = "ไม่มีงานที่กำลังทำอยู่";
 
 const TOOL_DESCRIPTION: &str = "Run a PowerShell command on the user's Windows machine. \
@@ -353,14 +352,15 @@ impl RunCommandServer {
         };
         ctx.cwd = choose_cwd(&ctx.cwd, args.cwd.as_deref());
         let service = &self.inner.service;
-        match service.execute(&ctx, &args.command).await {
-            CommandOutcome::Ran { result, .. } => {
-                CallToolResult::success(vec![ContentBlock::text(for_model(
-                    &result,
-                    service.limits().max_for_model,
-                ))])
-            }
-            CommandOutcome::Denied => tool_error(DENIED_TEXT),
+        let outcome = service.execute(&ctx, &args.command).await;
+        // Chat history is how other providers see this command later.
+        // A failed write must not change what the model is told.
+        let text = service
+            .add_result_to_chat(&ctx, &args.command, &outcome)
+            .unwrap_or_else(|_| service.text_for_model(&outcome));
+        match outcome {
+            CommandOutcome::Ran { .. } => CallToolResult::success(vec![ContentBlock::text(text)]),
+            CommandOutcome::Denied => tool_error(&text),
         }
     }
 }

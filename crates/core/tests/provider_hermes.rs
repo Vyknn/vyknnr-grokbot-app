@@ -660,6 +660,10 @@ async fn approval_request_goes_through_authorize() {
     let cmds = r.store.commands(r.conv).unwrap();
     assert_eq!(cmds.len(), 1);
     assert_eq!(cmds[0].approval, Approval::Denied);
+    let msgs = r.store.messages(r.conv).unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].role, Role::CommandResult);
+    assert_eq!(msgs[0].content, "[คำสั่งถูกปฏิเสธ] > Remove-Item x");
 }
 
 #[tokio::test]
@@ -692,6 +696,14 @@ async fn approved_answers_once_and_records_external() {
     assert_eq!(cmds.len(), 1);
     assert_eq!(cmds[0].command, "git push");
     assert_eq!(cmds[0].approval, Approval::User);
+    let msgs = r.store.messages(r.conv).unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].role, Role::CommandResult);
+    assert_eq!(msgs[0].provider, Some(ProviderId::Hermes));
+    assert!(msgs[0].content.starts_with("[คำสั่งที่รันโดย hermes]\ncwd: "));
+    assert!(msgs[0]
+        .content
+        .ends_with("> git push\nexit: -\n(รันโดยโปรแกรมภายนอก)"));
 }
 
 #[tokio::test]

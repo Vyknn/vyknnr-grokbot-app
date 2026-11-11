@@ -119,6 +119,8 @@ enum Step {
     Hang,
     /// `next()` returns `None`.
     End,
+    /// Waits until notified, then continues with the next step.
+    Gate(Arc<tokio::sync::Notify>),
 }
 
 #[derive(Default)]
@@ -203,6 +205,11 @@ impl ProviderTurn for ScriptedTurn {
         match self.steps.front().cloned() {
             None | Some(Step::End) => None,
             Some(Step::Hang) => std::future::pending().await,
+            Some(Step::Gate(n)) => {
+                n.notified().await;
+                self.steps.pop_front();
+                Box::pin(self.next()).await
+            }
             Some(Step::Ev(e)) => {
                 self.steps.pop_front();
                 Some(e)
@@ -931,4 +938,70 @@ async fn continue_with_rejects_wrong_message() {
         .await
         .unwrap_err();
     assert!(matches!(err, OrchestratorError::NotFound));
+}
+
+#[tokio::test]
+async fn mcp_command_from_cli_turn_is_in_history_for_next_provider() {
+    use rmcp::model::{CallToolRequestParams, ClientConfig};
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::ServiceExt;
+
+    let cli = ScriptedProvider::new(ProviderId::ClaudeCli);
+    let api = ScriptedProvider::new(ProviderId::Api);
+    let gate = Arc::new(tokio::sync::Notify::new());
+    cli.script(vec![text("listing"), Step::Gate(gate.clone()), done()]);
+    api.script(vec![text("seen"), done()]);
+    let r = rig(Opts::new(vec![cli.clone(), api.clone()])).await;
+
+    let orch = r.orch.clone();
+    let conv = r.conv;
+    let first = tokio::spawn(async move {
+        orch.send(
+            conv,
+            "list files".into(),
+            ProviderChoice::Manual(ProviderId::ClaudeCli),
+        )
+        .await
+    });
+    wait_started(&cli, 1).await;
+    let token = cli.last_request().unwrap().turn_token;
+    let transport = StreamableHttpClientTransport::from_uri(r.mcp.url_for_turn(&token));
+    let client = ClientConfig::default().serve(transport).await.unwrap();
+    let args = serde_json::json!({"command": "Write-Output via-mcp"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let res = client
+        .call_tool(CallToolRequestParams::new("run_command").with_arguments(args))
+        .await
+        .unwrap();
+    assert_ne!(res.is_error, Some(true));
+    let _ = client.cancel().await;
+    gate.notify_one();
+    assert!(matches!(
+        first.await.unwrap().unwrap(),
+        TurnOutcome::Completed { .. }
+    ));
+
+    r.orch
+        .send(
+            r.conv,
+            "what ran?".into(),
+            ProviderChoice::Manual(ProviderId::Api),
+        )
+        .await
+        .unwrap();
+    let hist = api.last_request().unwrap().history;
+    let cmd = hist
+        .iter()
+        .find(|m| m.role == Role::CommandResult)
+        .expect("MCP command result must be in history");
+    assert_eq!(cmd.provider, Some(ProviderId::ClaudeCli));
+    assert!(
+        cmd.content.starts_with("[คำสั่งที่รันโดย claude_cli]\n"),
+        "{}",
+        cmd.content
+    );
+    assert!(cmd.content.contains("> Write-Output via-mcp\nexit: 0\n"));
+    assert!(cmd.content.contains("via-mcp"));
 }

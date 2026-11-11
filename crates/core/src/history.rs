@@ -23,6 +23,11 @@ pub fn format_command_result(
     )
 }
 
+/// History entry for a command that was denied (never ran).
+pub fn format_denied_command(command: &str) -> String {
+    format!("[คำสั่งถูกปฏิเสธ] > {command}")
+}
+
 /// Translate to (role, content) pairs; adjacent same-role entries merged.
 fn translate(history: &[Message]) -> Vec<(&'static str, String)> {
     let mut out: Vec<(&'static str, String)> = Vec::new();
