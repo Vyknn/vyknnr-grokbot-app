@@ -95,7 +95,10 @@ fn export_never_contains_secrets() {
 #[test]
 fn token_tails_fully_redacted_and_bearer_case_insensitive() {
     let cases = [
-        ("Authorization: Bearer abc/def+ghi==", "Authorization: [REDACTED]"),
+        (
+            "Authorization: Bearer abc/def+ghi==",
+            "Authorization: [REDACTED]",
+        ),
         (
             "authorization: bearer eyJhbGciOi.eyJzdWIiOi.c2lnbmF0dXJl~x",
             "authorization: [REDACTED]",
