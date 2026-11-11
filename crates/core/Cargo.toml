@@ -14,8 +14,10 @@ async-trait = "0.1"
 url = "2"
 thiserror = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", features = ["process", "io-util", "time", "rt", "macros", "sync"] }
+tokio-util = "0.7"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 wiremock = "0.6"
 tempfile = "3"
