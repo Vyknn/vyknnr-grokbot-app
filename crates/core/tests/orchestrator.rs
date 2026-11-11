@@ -657,10 +657,13 @@ async fn auto_route_high_confidence_emits_route_decided() {
         AppEvent::RouteDecided {
             provider: ProviderId::Hermes,
             source: DecisionSource::Jev { .. },
+            probability: Some(p),
             ..
-        }
+        } if (*p - 0.9).abs() < 1e-9
     )));
     assert_eq!(api.starts(), 0);
+    let d = r.store.decisions(r.conv).unwrap();
+    assert_eq!(d[0].payload["probability"], 0.9);
 }
 
 #[tokio::test]

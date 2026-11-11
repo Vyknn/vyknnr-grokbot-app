@@ -18,6 +18,9 @@ pub struct ProviderProfile {
 pub struct RouteDecision {
     pub outcome: RouteOutcome,
     pub source: DecisionSource,
+    /// Jev's probability for the chosen provider, only when the outcome is
+    /// `Auto` decided by Jev.
+    pub probability: Option<f64>,
 }
 
 pub struct Router {
@@ -58,6 +61,7 @@ fn fallback(available: &[ProviderProfile], reason: String) -> RouteDecision {
             ranked: available.iter().map(|p| (p.id, 0.0)).collect(),
         },
         source: DecisionSource::Fallback { reason },
+        probability: None,
     }
 }
 
@@ -77,12 +81,14 @@ impl Router {
                 return RouteDecision {
                     outcome: RouteOutcome::AskUser { ranked: vec![] },
                     source: DecisionSource::Manual,
+                    probability: None,
                 }
             }
             [only] => {
                 return RouteDecision {
                     outcome: RouteOutcome::Auto(only.id),
                     source: DecisionSource::Manual,
+                    probability: None,
                 }
             }
             _ => {}
@@ -108,11 +114,17 @@ impl Router {
         match resp.choice("route") {
             Ok((choice, probs)) => {
                 let ids: Vec<ProviderId> = available.iter().map(|p| p.id).collect();
+                let outcome = route_outcome(choice, probs, &ids, &self.thresholds);
+                let probability = match &outcome {
+                    RouteOutcome::Auto(p) => probs.get(p.as_str()).copied(),
+                    RouteOutcome::AskUser { .. } => None,
+                };
                 RouteDecision {
-                    outcome: route_outcome(choice, probs, &ids, &self.thresholds),
+                    outcome,
                     source: DecisionSource::Jev {
                         model: resp.model.clone(),
                     },
+                    probability,
                 }
             }
             Err(e) => fallback(available, format!("jev_error: {e}")),

@@ -141,6 +141,7 @@ async fn router_single_available_provider_skips_jev() {
         .await;
     assert_eq!(d.outcome, RouteOutcome::Auto(ProviderId::Api));
     assert_eq!(d.source, DecisionSource::Manual);
+    assert_eq!(d.probability, None);
     assert_eq!(f.calls(), 0);
 }
 
@@ -183,6 +184,7 @@ async fn router_sends_only_available_providers_as_criteria() {
         )
         .await;
     assert_eq!(d.outcome, RouteOutcome::Auto(ProviderId::Api));
+    assert_eq!(d.probability, Some(0.9));
     assert_eq!(
         d.source,
         DecisionSource::Jev {
@@ -213,6 +215,22 @@ async fn router_missing_answer_falls_back() {
         .await;
     assert!(matches!(d.outcome, RouteOutcome::AskUser { .. }));
     assert!(matches!(d.source, DecisionSource::Fallback { .. }));
+    assert_eq!(d.probability, None);
+}
+
+#[tokio::test]
+async fn router_low_confidence_has_no_probability() {
+    let f = FakeJev::answers(vec![("route", choice("api", 0.5))]);
+    let d = Router::new(dyn_jev(&f), t())
+        .decide(
+            "hi",
+            &[],
+            &[prof(ProviderId::Api), prof(ProviderId::Hermes)],
+        )
+        .await;
+    assert!(matches!(d.outcome, RouteOutcome::AskUser { .. }));
+    assert!(matches!(d.source, DecisionSource::Jev { .. }));
+    assert_eq!(d.probability, None);
 }
 
 #[tokio::test]

@@ -236,7 +236,11 @@ impl Orchestrator {
                 self.store.record_decision(
                     user.id,
                     DecisionKind::Route,
-                    &json!({ "outcome": d.outcome, "source": d.source }),
+                    &json!({
+                        "outcome": d.outcome,
+                        "source": d.source,
+                        "probability": d.probability,
+                    }),
                 )?;
                 match d.outcome {
                     RouteOutcome::Auto(p) => {
@@ -244,8 +248,7 @@ impl Orchestrator {
                             conversation_id: conv_id,
                             provider: p,
                             source: d.source,
-                            // The router does not expose the winning probability.
-                            probability: None,
+                            probability: d.probability,
                         });
                         p
                     }
