@@ -36,6 +36,13 @@ fn args_disable_builtin_tools_and_allow_only_our_mcp() {
         .iter()
         .any(|x| x.contains("dangerously") || x == "bypassPermissions"));
     assert!(!a.iter().any(|x| x == "--permission-mode"));
+    // User/project/local settings (hooks, plugins) must not load: they run
+    // shell commands outside our gate.
+    let i = a.iter().position(|x| x == "--setting-sources").unwrap();
+    assert_eq!(a[i + 1], "");
+    let i = a.iter().position(|x| x == "--settings").unwrap();
+    assert_eq!(a[i + 1], r#"{"disableAllHooks":true}"#);
+    assert!(!a.iter().any(|x| x == "--safe-mode" || x == "--bare"));
     assert!(!a.iter().any(|x| x == "--model"));
 }
 
@@ -49,6 +56,10 @@ fn args_exact_order_and_model() {
         "--verbose",
         "--include-partial-messages",
         "--no-session-persistence",
+        "--setting-sources",
+        "",
+        "--settings",
+        r#"{"disableAllHooks":true}"#,
         "--strict-mcp-config",
         "--mcp-config",
         "C:\\t\\m.json",
@@ -175,11 +186,11 @@ fn req(cwd: &Path) -> TurnRequest {
 }
 
 /// Writes `fake_claude.cmd` into `dir`. The script records stdin and the
-/// `--mcp-config` path (argument 9), then runs `body`.
+/// `--mcp-config` path (argument 13; four `shift`s make it `%9`), then runs `body`.
 fn fake(dir: &Path, body: &str) -> PathBuf {
     let p = dir.join("fake_claude.cmd");
     let script = format!(
-        "@echo off\r\nfindstr \"^\" > \"{d}\\stdin.txt\"\r\necho %~9> \"{d}\\cfgpath.txt\"\r\n{body}\r\n",
+        "@echo off\r\nfindstr \"^\" > \"{d}\\stdin.txt\"\r\nshift\r\nshift\r\nshift\r\nshift\r\necho %~9> \"{d}\\cfgpath.txt\"\r\n{body}\r\n",
         d = dir.display()
     );
     std::fs::write(&p, script).unwrap();

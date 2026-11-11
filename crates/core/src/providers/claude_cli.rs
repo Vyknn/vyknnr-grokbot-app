@@ -27,6 +27,10 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// Grace period for the CLI to exit on its own after its `result` line.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 
+/// Loads no user/project/local settings and disables hooks: hooks, plugins
+/// and CLAUDE.md would otherwise run shell commands outside our gate.
+const SETTINGS_JSON: &str = r#"{"disableAllHooks":true}"#;
+
 /// CLI arguments for one turn. Never adds a permission-mode or
 /// permission-bypass flag.
 pub fn build_args(mcp_config_path: &Path, model: Option<&str>) -> Vec<String> {
@@ -37,6 +41,10 @@ pub fn build_args(mcp_config_path: &Path, model: Option<&str>) -> Vec<String> {
         "--verbose",
         "--include-partial-messages",
         "--no-session-persistence",
+        "--setting-sources",
+        "",
+        "--settings",
+        SETTINGS_JSON,
         "--strict-mcp-config",
         "--mcp-config",
     ]
