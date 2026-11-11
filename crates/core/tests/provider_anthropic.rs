@@ -312,3 +312,134 @@ fn sse_parser_handles_one_byte_chunks_with_thai() {
     assert_eq!(out[0].data, "{\"t\":\"สวัสดี\"}");
     assert_eq!(out[1].event.as_deref(), Some("ping"));
 }
+
+fn tool_round(ids: &[&str]) -> String {
+    let mut ev = vec![];
+    for (i, id) in ids.iter().enumerate() {
+        ev.push(tool_start(i, id, "run_command"));
+        ev.push(json_delta(i, "{\"command\":\"dir\"}"));
+        ev.push(block_stop(i));
+    }
+    ev.push(msg_delta("tool_use"));
+    ev.push(stop());
+    sse(&ev)
+}
+
+async fn drain_proposals(turn: &mut Box<dyn ProviderTurn>, n: usize) {
+    for _ in 0..n {
+        assert!(matches!(
+            turn.next().await,
+            Some(ChatEvent::CommandProposed { .. })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn no_submission_yields_error_then_none() {
+    let server = MockServer::start().await;
+    mount_two_rounds(
+        &server,
+        tool_round(&["a"]),
+        sse(&[msg_delta("end_turn"), stop()]),
+    )
+    .await;
+    let mut turn = provider(&server).start(req()).await.unwrap();
+    drain_proposals(&mut turn, 1).await;
+    match turn.next().await {
+        Some(ChatEvent::Error(m)) => assert!(m.contains("tool results missing for: a"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(turn.next().await, None);
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn partial_submission_names_missing_id() {
+    let server = MockServer::start().await;
+    mount_two_rounds(
+        &server,
+        tool_round(&["a", "b"]),
+        sse(&[msg_delta("end_turn"), stop()]),
+    )
+    .await;
+    let mut turn = provider(&server).start(req()).await.unwrap();
+    drain_proposals(&mut turn, 2).await;
+    turn.submit_command_result("a", "x".into()).await.unwrap();
+    match turn.next().await {
+        Some(ChatEvent::Error(m)) => {
+            assert!(m.contains("b"), "{m}");
+            assert!(!m.contains("for: a"), "{m}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(turn.next().await, None);
+}
+
+#[tokio::test]
+async fn tool_use_without_blocks_is_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(event_stream(sse(&[msg_delta("tool_use"), stop()])))
+        .mount(&server)
+        .await;
+    let mut turn = provider(&server).start(req()).await.unwrap();
+    assert_eq!(
+        turn.next().await,
+        Some(ChatEvent::Error("tool_use without tool calls".into()))
+    );
+    assert_eq!(turn.next().await, None);
+}
+
+#[tokio::test]
+async fn dropping_next_mid_stream_then_cancel_ends() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            event_stream(sse(&[text_delta(0, "a"), msg_delta("end_turn"), stop()]))
+                .set_delay(std::time::Duration::from_millis(500)),
+        )
+        .mount(&server)
+        .await;
+    let mut turn = provider(&server).start(req()).await.unwrap();
+    let r = tokio::time::timeout(std::time::Duration::from_millis(50), turn.next()).await;
+    assert!(r.is_err());
+    turn.cancel().await;
+    assert_eq!(turn.next().await, None);
+}
+
+#[tokio::test]
+async fn dropping_next_during_second_request_does_not_duplicate_tool_result() {
+    let server = MockServer::start().await;
+    let second = event_stream(sse(&[text_delta(0, "done"), msg_delta("end_turn"), stop()]))
+        .set_delay(std::time::Duration::from_millis(400));
+    Mock::given(method("POST"))
+        .and(body_string_contains("tool_result"))
+        .respond_with(second)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(event_stream(tool_round(&["a"])))
+        .with_priority(5)
+        .mount(&server)
+        .await;
+    let mut turn = provider(&server).start(req()).await.unwrap();
+    drain_proposals(&mut turn, 1).await;
+    turn.submit_command_result("a", "OUT".into()).await.unwrap();
+    let r = tokio::time::timeout(std::time::Duration::from_millis(100), turn.next()).await;
+    assert!(r.is_err());
+    assert_eq!(turn.next().await, Some(ChatEvent::TextDelta("done".into())));
+    assert_eq!(turn.next().await, Some(ChatEvent::Done));
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 3);
+    let b2: Value = reqs[1].body_json().unwrap();
+    let b3: Value = reqs[2].body_json().unwrap();
+    assert_eq!(b2["messages"], b3["messages"]);
+    let m = b3["messages"].as_array().unwrap();
+    let n = m
+        .iter()
+        .filter(|x| x["content"][0]["type"] == "tool_result")
+        .count();
+    assert_eq!(n, 1);
+    assert_eq!(m.last().unwrap()["content"][0]["content"], "OUT");
+}

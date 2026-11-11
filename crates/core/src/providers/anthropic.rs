@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::time::Duration;
 use url::Url;
 
 const SYSTEM_PROMPT: &str = "You are a helpful assistant running inside a desktop app on Windows. To run a shell command on the user's machine, call the run_command tool; commands are reviewed for safety and the user may deny them. The conversation may include replies from other assistants and command results; treat them as context.";
@@ -29,7 +30,11 @@ impl AnthropicProvider {
             base_url,
             api_key,
             model,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .read_timeout(Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
         }
     }
 }
@@ -207,31 +212,32 @@ impl AnthropicTurn {
         self.queue.push_back(ChatEvent::Error(msg));
     }
 
-    async fn open_request(&mut self) {
-        self.blocks.clear();
-        self.stop_reason = None;
-        self.parser = SseParser::default();
+    /// Send one request. Pure with respect to `self`: dropping the future
+    /// mid-flight leaves all state untouched.
+    async fn send_request(
+        client: reqwest::Client,
+        url: Url,
+        api_key: String,
+        model: String,
+        messages: &[Value],
+    ) -> std::result::Result<ByteStream, String> {
         let body = json!({
-            "model": self.model,
+            "model": model,
             "max_tokens": 8192,
             "stream": true,
             "system": SYSTEM_PROMPT,
-            "messages": self.messages,
+            "messages": messages,
             "tools": [tool_definition()],
         });
-        let resp = self
-            .client
-            .post(self.url.clone())
-            .header("x-api-key", &self.api_key)
+        let resp = client
+            .post(url)
+            .header("x-api-key", &api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .body(body.to_string())
             .send()
-            .await;
-        let resp = match resp {
-            Ok(r) => r,
-            Err(e) => return self.fail(format!("request failed: {}", e.without_url())),
-        };
+            .await
+            .map_err(|e| format!("request failed: {}", e.without_url()))?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -239,10 +245,34 @@ impl AnthropicTurn {
                 .ok()
                 .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
                 .unwrap_or(text);
-            return self.fail(format!("API error {}: {}", status.as_u16(), detail));
+            return Err(format!("API error {}: {}", status.as_u16(), detail));
         }
-        self.stream = Some(Box::pin(resp.bytes_stream()));
-        self.state = State::Streaming;
+        Ok(Box::pin(resp.bytes_stream()))
+    }
+
+    /// Send `messages`; only after success commit them and reset per-response state.
+    async fn begin_response(&mut self, messages: Vec<Value>) {
+        let sent = Self::send_request(
+            self.client.clone(),
+            self.url.clone(),
+            self.api_key.clone(),
+            self.model.clone(),
+            &messages,
+        )
+        .await;
+        match sent {
+            Ok(stream) => {
+                self.messages = messages;
+                self.results.clear();
+                self.errored.clear();
+                self.blocks.clear();
+                self.stop_reason = None;
+                self.parser = SseParser::default();
+                self.stream = Some(stream);
+                self.state = State::Streaming;
+            }
+            Err(e) => self.fail(e),
+        }
     }
 
     fn block_mut(&mut self, index: u64) -> Option<&mut Block> {
@@ -342,6 +372,14 @@ impl AnthropicTurn {
             self.queue.push_back(ChatEvent::Done);
             return;
         }
+        if !self
+            .blocks
+            .iter()
+            .any(|(_, b)| matches!(b, Block::Tool { .. }))
+        {
+            self.fail("tool_use without tool calls".into());
+            return;
+        }
         let mut content = Vec::new();
         let mut awaiting = Vec::new();
         for (_, b) in &self.blocks {
@@ -374,14 +412,8 @@ impl AnthropicTurn {
         self.state = State::Waiting(awaiting);
     }
 
-    fn all_results_ready(&self) -> bool {
-        match &self.state {
-            State::Waiting(a) => a.iter().all(|id| self.results.contains_key(id)),
-            _ => false,
-        }
-    }
-
-    fn push_tool_results(&mut self) {
+    /// Messages for the follow-up request: history + tool_result user message.
+    fn messages_with_tool_results(&self) -> Vec<Value> {
         let mut results = Vec::new();
         for (_, b) in &self.blocks {
             if let Block::Tool { id, .. } = b {
@@ -393,10 +425,20 @@ impl AnthropicTurn {
                 results.push(r);
             }
         }
-        self.results.clear();
-        self.errored.clear();
-        self.messages
-            .push(json!({"role": "user", "content": results}));
+        let mut messages = self.messages.clone();
+        messages.push(json!({"role": "user", "content": results}));
+        messages
+    }
+
+    fn missing_results(&self) -> Vec<String> {
+        match &self.state {
+            State::Waiting(a) => a
+                .iter()
+                .filter(|id| !self.results.contains_key(*id))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -410,13 +452,18 @@ impl ProviderTurn for AnthropicTurn {
             }
             match self.state {
                 State::Finished => return None,
-                State::NotStarted => self.open_request().await,
+                State::NotStarted => {
+                    let messages = self.messages.clone();
+                    self.begin_response(messages).await;
+                }
                 State::Waiting(_) => {
-                    if !self.all_results_ready() {
-                        return None;
+                    let missing = self.missing_results();
+                    if !missing.is_empty() {
+                        self.fail(format!("tool results missing for: {}", missing.join(", ")));
+                        continue;
                     }
-                    self.push_tool_results();
-                    self.open_request().await;
+                    let messages = self.messages_with_tool_results();
+                    self.begin_response(messages).await;
                 }
                 State::Streaming => {
                     let Some(stream) = self.stream.as_mut() else {

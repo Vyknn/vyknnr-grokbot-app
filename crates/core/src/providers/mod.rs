@@ -21,6 +21,13 @@ pub trait ChatProvider: Send + Sync {
     async fn start(&self, req: TurnRequest) -> Result<Box<dyn ProviderTurn>>;
 }
 
+/// One streaming turn.
+///
+/// Contract: callers stop an in-flight turn by dropping the pending `next()`
+/// future (e.g. `tokio::select!` with a cancellation token) and then calling
+/// `cancel()`. `next()` must be cancel-safe: dropping its future never corrupts
+/// state or duplicates messages. When tool results are still owed, `next()`
+/// yields `ChatEvent::Error` rather than `None`.
 #[async_trait]
 pub trait ProviderTurn: Send {
     async fn next(&mut self) -> Option<ChatEvent>;
