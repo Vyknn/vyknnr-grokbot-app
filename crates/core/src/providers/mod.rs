@@ -5,6 +5,7 @@ use crate::{Availability, ChatEvent, ProviderId, TurnRequest};
 use async_trait::async_trait;
 
 pub mod anthropic;
+pub mod claude_cli;
 
 pub type Result<T> = std::result::Result<T, ProviderError>;
 

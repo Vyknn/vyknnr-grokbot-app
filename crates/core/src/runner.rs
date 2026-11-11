@@ -42,7 +42,7 @@ pub struct RunResult {
     pub cancelled: bool,
 }
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const PREFIX: &str =
     "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; ";
 
@@ -126,7 +126,8 @@ fn append_capped(out: &mut String, s: &str, max: usize, truncated: &mut bool) {
     }
 }
 
-async fn kill_tree(pid: Option<u32>) {
+/// Kill `pid` and all its descendants (`taskkill /T /F`). No-op for `None`.
+pub(crate) async fn kill_tree(pid: Option<u32>) {
     if let Some(pid) = pid {
         let _ = Command::new("taskkill")
             .args(["/T", "/F", "/PID", &pid.to_string()])
