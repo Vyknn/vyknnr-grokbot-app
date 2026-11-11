@@ -1,6 +1,7 @@
 //! Shared app state and the parts rebuilt when settings or keys change.
 
 use crate::approver::TauriApprover;
+use crate::turns::TurnRegistry;
 use assistant_core::command_service::CommandService;
 use assistant_core::decision::gate::{CommandCheck, CommandChecker, CommandGate};
 use assistant_core::decision::router::Router;
@@ -15,9 +16,9 @@ use assistant_core::settings::{SecretKey, SecretStore, Settings};
 use assistant_core::store::Store;
 use assistant_core::ProviderId;
 use async_trait::async_trait;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub type ProviderMap = HashMap<ProviderId, Arc<dyn ChatProvider>>;
@@ -104,8 +105,10 @@ pub struct AppState {
     pub providers: RwLock<ProviderMap>,
     /// Serialises settings/key saves and the rebuilds that follow.
     pub save_lock: tokio::sync::Mutex<()>,
-    /// Conversations with a spawned turn (checked before spawning).
-    pub busy: Arc<Mutex<HashSet<i64>>>,
+    /// Running turns and their cancel intent (set before the orchestrator claims).
+    pub turns: Arc<TurnRegistry>,
+    /// Set when the MCP server runs on a temporary fallback port.
+    pub mcp_port_fallback: bool,
     /// Problems found at startup, shown in the UI.
     pub startup_notices: Vec<String>,
 }
@@ -128,60 +131,7 @@ impl AppState {
 
     /// Cancel every running turn and deny every pending approval.
     pub fn shutdown_turns(&self) {
+        self.turns.cancel_all();
         self.approver.drop_all();
-        let ids: Vec<i64> = self
-            .busy
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .copied()
-            .collect();
-        for id in ids {
-            self.orchestrator.cancel(id);
-        }
-    }
-}
-
-/// Removes a conversation from the busy set when the spawned turn ends.
-pub struct BusyGuard {
-    pub busy: Arc<Mutex<HashSet<i64>>>,
-    pub conversation_id: i64,
-}
-
-impl BusyGuard {
-    /// Claim `conversation_id`, or `None` if a turn is already running there.
-    pub fn claim(busy: &Arc<Mutex<HashSet<i64>>>, conversation_id: i64) -> Option<Self> {
-        let mut set = busy.lock().unwrap_or_else(|e| e.into_inner());
-        if !set.insert(conversation_id) {
-            return None;
-        }
-        Some(Self {
-            busy: busy.clone(),
-            conversation_id,
-        })
-    }
-}
-
-impl Drop for BusyGuard {
-    fn drop(&mut self) {
-        self.busy
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.conversation_id);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn busy_guard_claims_once_and_frees_on_drop() {
-        let busy = Arc::new(Mutex::new(HashSet::new()));
-        let g = BusyGuard::claim(&busy, 7).unwrap();
-        assert!(BusyGuard::claim(&busy, 7).is_none());
-        assert!(BusyGuard::claim(&busy, 8).is_some());
-        drop(g);
-        assert!(BusyGuard::claim(&busy, 7).is_some());
     }
 }

@@ -1,8 +1,9 @@
 //! Tauri commands. Secrets never leave the backend: there is no get_secret.
 
-use crate::app_state::{AppState, BusyGuard};
+use crate::app_state::AppState;
 use crate::parse;
 use crate::sink::TURN_OUTCOME;
+use crate::turns::{drive, Driven, INTERNAL_ERROR_TEXT};
 use assistant_core::orchestrator::{OrchestratorError, ProviderChoice, TurnOutcome};
 use assistant_core::settings::{SecretKey, Settings};
 use assistant_core::store::Conversation;
@@ -30,7 +31,25 @@ pub struct TurnOutcomeEvent {
     pub error: Option<String>,
 }
 
-fn emit_outcome(app: &AppHandle, conversation_id: i64, r: Result<TurnOutcome, OrchestratorError>) {
+fn emit_outcome(
+    app: &AppHandle,
+    conversation_id: i64,
+    r: Driven<Result<TurnOutcome, OrchestratorError>>,
+) {
+    let r = match r {
+        Driven::Finished(r) => r,
+        Driven::Crashed => {
+            let _ = app.emit(
+                TURN_OUTCOME,
+                TurnOutcomeEvent {
+                    conversation_id,
+                    outcome: None,
+                    error: Some(INTERNAL_ERROR_TEXT.to_string()),
+                },
+            );
+            return;
+        }
+    };
     let ev = match r {
         Ok(o) => TurnOutcomeEvent {
             conversation_id,
@@ -102,6 +121,7 @@ pub fn rename_conversation(
 #[tauri::command]
 pub fn delete_conversation(state: State<'_, Arc<AppState>>, id: i64) -> CmdResult<()> {
     // Stop its turn and deny its pending approvals first.
+    state.turns.cancel(id);
     state.orchestrator.cancel(id);
     state.approver.drop_conversation(id);
     state.store.delete_conversation(id).map_err(err)
@@ -126,11 +146,7 @@ pub fn get_conversation_detail(
     state: State<'_, Arc<AppState>>,
     id: i64,
 ) -> CmdResult<ConversationDetail> {
-    let busy = state
-        .busy
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains(&id);
+    let busy = state.turns.is_busy(id);
     Ok(ConversationDetail {
         messages: state.store.messages(id).map_err(err)?,
         commands: state.store.commands(id).map_err(err)?,
@@ -154,11 +170,12 @@ pub fn send_message(
     }
     let choice: ProviderChoice = parse::provider_choice(provider.as_deref())?;
     state.store.conversation(conversation_id).map_err(err)?;
-    let guard = BusyGuard::claim(&state.busy, conversation_id).ok_or(BUSY_TEXT)?;
+    let slot = state.turns.claim(conversation_id).ok_or(BUSY_TEXT)?;
     let orch = state.orchestrator.clone();
     tauri::async_runtime::spawn(async move {
-        let _guard = guard;
-        let r = orch.send(conversation_id, text, choice).await;
+        let o2 = orch.clone();
+        let turn = async move { o2.send(conversation_id, text, choice).await };
+        let r = drive(slot, turn, || orch.cancel(conversation_id)).await;
         emit_outcome(&app, conversation_id, r);
     });
     Ok(())
@@ -174,13 +191,15 @@ pub fn continue_with(
 ) -> CmdResult<()> {
     let provider: ProviderId = provider.parse()?;
     state.store.conversation(conversation_id).map_err(err)?;
-    let guard = BusyGuard::claim(&state.busy, conversation_id).ok_or(BUSY_TEXT)?;
+    let slot = state.turns.claim(conversation_id).ok_or(BUSY_TEXT)?;
     let orch = state.orchestrator.clone();
     tauri::async_runtime::spawn(async move {
-        let _guard = guard;
-        let r = orch
-            .continue_with(conversation_id, user_message_id, provider)
-            .await;
+        let o2 = orch.clone();
+        let turn = async move {
+            o2.continue_with(conversation_id, user_message_id, provider)
+                .await
+        };
+        let r = drive(slot, turn, || orch.cancel(conversation_id)).await;
         emit_outcome(&app, conversation_id, r);
     });
     Ok(())
@@ -188,6 +207,9 @@ pub fn continue_with(
 
 #[tauri::command]
 pub fn cancel_turn(state: State<'_, Arc<AppState>>, conversation_id: i64) {
+    // Recorded at the app layer too, so a Stop before the orchestrator has
+    // claimed the turn is still honoured.
+    state.turns.cancel(conversation_id);
     state.orchestrator.cancel(conversation_id);
 }
 
@@ -328,12 +350,17 @@ pub async fn hermes_setup_snippet(state: State<'_, Arc<AppState>>) -> CmdResult<
         .get(SecretKey::McpHermes)
         .ok_or("ยังไม่มี key ของ MCP")?;
     let s = state.settings.read().await;
-    Ok(parse::hermes_snippet(
+    let snippet = parse::hermes_snippet(
         &state.mcp.hermes_url(),
         &key,
         &s.hermes_allowed_toolsets,
         &s.hermes_base_url,
-    ))
+    );
+    Ok(if state.mcp_port_fallback {
+        format!("{}{snippet}", parse::fallback_port_warning(s.mcp_port))
+    } else {
+        snippet
+    })
 }
 
 /// Startup problems to show in the UI.

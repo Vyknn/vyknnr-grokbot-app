@@ -99,6 +99,16 @@ pub fn toolsets_to_disable(allowed: &[String]) -> Vec<&'static str> {
         .collect()
 }
 
+/// Prepended to the Hermes snippet when the MCP server runs on a temporary port.
+pub fn fallback_port_warning(configured: u16) -> String {
+    format!(
+        "# คำเตือน: ตอนนี้ MCP server ใช้พอร์ตชั่วคราว เพราะพอร์ต {configured} ไม่ว่าง
+# URL ด้านล่างจะเปลี่ยนเมื่อเปิดแอปใหม่ ให้แก้พอร์ตในหน้าตั้งค่า เปิดแอปใหม่ แล้วคัดลอกข้อความนี้อีกครั้ง
+
+"
+    )
+}
+
 /// Text the user pastes into Hermes's config. Contains the MCP key.
 pub fn hermes_snippet(mcp_url: &str, mcp_key: &str, allowed: &[String], api_base: &str) -> String {
     let disable = toolsets_to_disable(allowed);
@@ -150,6 +160,13 @@ mod tests {
         ] {
             assert_eq!(secret_key(n).unwrap(), k);
         }
+    }
+
+    #[test]
+    fn fallback_warning_mentions_port_and_restart() {
+        let w = fallback_port_warning(8765);
+        assert!(w.contains("8765") && w.contains("พอร์ตชั่วคราว"));
+        assert!(w.lines().all(|l| l.is_empty() || l.starts_with('#')));
     }
 
     #[test]

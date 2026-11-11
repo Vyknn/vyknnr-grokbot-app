@@ -5,6 +5,7 @@ mod approver;
 mod commands;
 mod parse;
 mod sink;
+mod turns;
 
 use app_state::{build_jev, build_providers, AppState, SwappableGate};
 use approver::TauriApprover;
@@ -17,9 +18,8 @@ use assistant_core::runner::RunLimits;
 use assistant_core::settings::{KeyringStore, SecretKey, SecretStore, Settings};
 use assistant_core::store::Store;
 use sink::{TauriApprovalUi, TauriSink};
-use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Manager, RunEvent, WindowEvent};
 
@@ -31,16 +31,16 @@ fn random_key() -> Result<String, String> {
 }
 
 /// Start the MCP server on the configured port; if that fails, fall back to
-/// a free port so the app still works, and report why.
+/// a free port so the app still works, and report why. The flag is true on fallback.
 async fn start_mcp(
     port: u16,
     service: Arc<CommandService>,
     key: String,
     notices: &mut Vec<String>,
-) -> Result<McpServerHandle, String> {
+) -> Result<(McpServerHandle, bool), String> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     match McpServer::start(addr, service.clone(), key.clone()).await {
-        Ok(h) => Ok(h),
+        Ok(h) => Ok((h, false)),
         Err(e) => {
             let fallback =
                 McpServer::start(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), service, key)
@@ -50,7 +50,7 @@ async fn start_mcp(
                 "เปิด MCP server ที่พอร์ต {port} ไม่ได้ ({e}) จึงใช้พอร์ต {} ชั่วคราว: Claude CLI ใช้ได้ตามปกติ แต่ Hermes จะต่อไม่ได้จนกว่าจะแก้ (เปลี่ยนพอร์ตในหน้าตั้งค่าแล้วเปิดแอปใหม่ และอัปเดต config ของ Hermes)",
                 fallback.local_addr().port()
             ));
-            Ok(fallback)
+            Ok((fallback, true))
         }
     }
 }
@@ -96,7 +96,7 @@ fn setup(app: &tauri::App) -> Result<AppState, String> {
         Duration::from_secs(settings.approval_timeout_secs),
     ));
 
-    let mcp = tauri::async_runtime::block_on(start_mcp(
+    let (mcp, mcp_port_fallback) = tauri::async_runtime::block_on(start_mcp(
         settings.mcp_port,
         commands.clone(),
         mcp_key,
@@ -131,7 +131,8 @@ fn setup(app: &tauri::App) -> Result<AppState, String> {
         orchestrator,
         providers: tokio::sync::RwLock::new(providers),
         save_lock: tokio::sync::Mutex::new(()),
-        busy: Arc::new(Mutex::new(HashSet::new())),
+        turns: Arc::new(turns::TurnRegistry::default()),
+        mcp_port_fallback,
         startup_notices: notices,
     })
 }
@@ -144,6 +145,14 @@ fn shutdown(app: &tauri::AppHandle) {
 
 fn main() {
     let app = tauri::Builder::default()
+        // Must be the first plugin: a second launch focuses this window and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let state = setup(app).map_err(|e| {
