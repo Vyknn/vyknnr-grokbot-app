@@ -27,3 +27,5 @@ target/
 ui/node_modules/
 ui/dist/
 .superpowers/
+.npm-cache/
+src-tauri/gen/
