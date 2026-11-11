@@ -135,6 +135,11 @@ impl CommandService {
         }
     }
 
+    /// Output limits used when running commands.
+    pub fn limits(&self) -> &RunLimits {
+        &self.limits
+    }
+
     /// Ask the user. Cancel, timeout or a dropped approver all mean Deny.
     async fn ask(
         &self,

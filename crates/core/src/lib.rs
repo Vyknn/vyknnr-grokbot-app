@@ -5,5 +5,6 @@ pub mod decision;
 pub mod export;
 pub mod history;
 pub mod jev;
+pub mod mcp_server;
 pub mod runner;
 pub mod store;

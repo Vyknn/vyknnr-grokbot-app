@@ -14,11 +14,16 @@ async-trait = "0.1"
 url = "2"
 thiserror = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
-tokio = { version = "1", features = ["process", "io-util", "time", "rt", "macros", "sync"] }
+tokio = { version = "1", features = ["process", "io-util", "time", "rt", "macros", "sync", "net"] }
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
+rmcp = { version = "=3.9.0", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+subtle = "2"
+http = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 wiremock = "0.6"
 tempfile = "3"
+rmcp = { version = "=3.9.0", features = ["client", "transport-streamable-http-client-reqwest"] }
