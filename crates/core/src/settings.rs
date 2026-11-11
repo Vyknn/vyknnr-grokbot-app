@@ -143,16 +143,12 @@ impl Settings {
         Ok(())
     }
 
-    /// Missing file → defaults (nothing written). Corrupt or invalid file →
-    /// moved to `<name>.bak` (overwriting any older backup), defaults returned.
+    /// Missing or unreadable file (permission, sharing violation, ...) →
+    /// defaults, file left untouched. Corrupt or invalid file → moved to
+    /// `<name>.bak` (overwriting any older backup), defaults returned.
     pub fn load(path: &Path) -> Settings {
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Settings::default(),
-            Err(_) => {
-                Self::back_up(path);
-                return Settings::default();
-            }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Settings::default();
         };
         match serde_json::from_str::<Settings>(&text) {
             Ok(mut s) if s.validate().is_ok() => {
@@ -385,6 +381,20 @@ mod tests {
         assert_eq!(s, Settings::default());
         assert!(!path.exists());
         assert_eq!(fs::read_to_string(&bak).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn unreadable_file_is_not_moved() {
+        // Reading a directory fails with an error other than NotFound,
+        // like a permission or sharing violation would.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("keep"), "x").unwrap();
+        assert_eq!(Settings::load(&path), Settings::default());
+        assert!(path.is_dir());
+        assert!(path.join("keep").exists());
+        assert!(!dir.path().join("settings.json.bak").exists());
     }
 
     #[test]
