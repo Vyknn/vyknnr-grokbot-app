@@ -93,6 +93,23 @@ fn export_never_contains_secrets() {
 }
 
 #[test]
+fn token_tails_fully_redacted_and_bearer_case_insensitive() {
+    let cases = [
+        ("Authorization: Bearer abc/def+ghi==", "Authorization: [REDACTED]"),
+        (
+            "authorization: bearer eyJhbGciOi.eyJzdWIiOi.c2lnbmF0dXJl~x",
+            "authorization: [REDACTED]",
+        ),
+        ("BEARER   abcdefgh12345678", "[REDACTED]"),
+        ("key=ts_live_abc_DEF-123456789 end", "key=[REDACTED] end"),
+        ("ts_test_abcdefgh_ijk-lmn", "[REDACTED]"),
+    ];
+    for (input, want) in cases {
+        assert_eq!(redact_secrets(input, &[]), want, "{input}");
+    }
+}
+
+#[test]
 fn known_secret_redacted_without_regex_match() {
     let (s, id) = seed("my pw is hunter2hunter2", "dir", "o");
     let k = vec!["hunter2hunter2".to_string()];

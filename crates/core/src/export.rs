@@ -24,7 +24,7 @@ fn patterns() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"sk-ant-[A-Za-z0-9_-]{8,}|ts_(?:live|test)_[A-Za-z0-9]{8,}|Bearer\s+[A-Za-z0-9._-]{8,}",
+            r"sk-ant-[A-Za-z0-9_-]{8,}|ts_(?:live|test)_[A-Za-z0-9_-]{8,}|(?i:bearer)\s+[A-Za-z0-9._~+/=-]{8,}",
         )
         .expect("valid regex")
     })
