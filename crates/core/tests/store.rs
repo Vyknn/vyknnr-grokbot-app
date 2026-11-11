@@ -210,3 +210,11 @@ fn store_is_send_sync() {
     fn f<T: Send + Sync>() {}
     f::<Store>();
 }
+
+#[test]
+fn conversation_by_id_and_not_found() {
+    let s = Store::open_in_memory().unwrap();
+    let c = s.create_conversation("หัวข้อ", Path::new("C:/x")).unwrap();
+    assert_eq!(s.conversation(c.id).unwrap(), c);
+    assert!(matches!(s.conversation(999), Err(StoreError::NotFound)));
+}

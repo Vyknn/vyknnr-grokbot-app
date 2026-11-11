@@ -92,7 +92,7 @@ fn parse_role(s: &str) -> Result<Role> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Conversation {
     pub id: i64,
     pub title: String,
@@ -101,7 +101,7 @@ pub struct Conversation {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DecisionRecord {
     pub id: i64,
     pub message_id: i64,
@@ -110,7 +110,7 @@ pub struct DecisionRecord {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CommandRecord {
     pub id: i64,
     pub conversation_id: i64,
@@ -204,6 +204,18 @@ impl Store {
             created_at: t,
             updated_at: t,
         })
+    }
+
+    pub fn conversation(&self, id: i64) -> Result<Conversation> {
+        let db = self.db();
+        let mut st = db.prepare(&format!(
+            "SELECT {CONV_COLS} FROM conversations WHERE id = ?1"
+        ))?;
+        let mut rows = st.query_map(params![id], |r| Ok(conv_from_row(r)))?;
+        match rows.next() {
+            Some(r) => r?,
+            None => Err(StoreError::NotFound),
+        }
     }
 
     pub fn list_conversations(&self) -> Result<Vec<Conversation>> {
