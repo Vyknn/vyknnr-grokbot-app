@@ -1,0 +1,40 @@
+: fixture built from docs; update against real Hermes
+
+event: message.delta
+data: {"delta":"Let me check "}
+
+: keepalive
+
+event: message.delta
+data: {"text":"the folder."}
+
+event: tool.started
+data: {"tool":"run_command","preview":"Get-ChildItem"}
+
+event: tool.completed
+data: {"tool":"run_command","duration":0.4,"error":false,"preview":"3 files"}
+
+event: message.interim
+data: {"text":"Already shown","already_streamed":true}
+
+event: message.interim
+data: {"text":" Interim note.","already_streamed":false}
+
+event: subagent.start
+data: {"name":"helper"}
+
+event: subagent.complete
+data: {"name":"helper"}
+
+event: approval.request
+data: {"request_id":"prompt_1","execution_generation":3,"command":"Remove-Item old.txt"}
+
+event: approval.request
+data: {"id":"prompt_2","generation":4,"args":{"command":"git push"}}
+
+event: message.delta
+data: {"content":" Done."}
+
+event: run.completed
+data: {"status":"completed"}
+

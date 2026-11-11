@@ -260,6 +260,11 @@ impl McpServerHandle {
         *self.inner.active_hermes.lock().unwrap() = token;
     }
 
+    /// The turn token Hermes calls are currently bound to, if any.
+    pub fn active_hermes_turn(&self) -> Option<String> {
+        self.inner.active_hermes.lock().unwrap().clone()
+    }
+
     pub fn local_addr(&self) -> SocketAddr {
         self.inner.addr
     }

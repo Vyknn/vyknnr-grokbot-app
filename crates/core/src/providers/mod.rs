@@ -6,6 +6,7 @@ use async_trait::async_trait;
 
 pub mod anthropic;
 pub mod claude_cli;
+pub mod hermes;
 
 pub type Result<T> = std::result::Result<T, ProviderError>;
 
