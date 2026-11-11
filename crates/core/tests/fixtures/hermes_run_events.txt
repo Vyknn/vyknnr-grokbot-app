@@ -32,6 +32,9 @@ data: {"request_id":"prompt_1","execution_generation":3,"command":"Remove-Item o
 event: approval.request
 data: {"id":"prompt_2","generation":4,"args":{"command":"git push"}}
 
+event: approval.request
+data: {"prompt_id":"prompt_3","generation":"5","description":"Delete temporary files"}
+
 event: message.delta
 data: {"content":" Done."}
 

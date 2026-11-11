@@ -22,21 +22,29 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 use url::Url;
 
-/// Hermes toolsets that must be disabled: they would let Hermes act on the
-/// machine without going through our safety gate.
-pub const DEFAULT_FORBIDDEN_TOOLSETS: &[&str] = &[
-    "terminal",
-    "code_execution",
-    "file",
-    "browser",
-    "computer_use",
-    "connections",
-    "catalog",
-    "cronjob",
+/// Hermes toolsets that may be enabled. Every toolset Hermes reports as
+/// enabled must be in this list; anything else (shell, files, code execution,
+/// composites/presets bundling them, unknown names) makes Hermes unavailable.
+pub const DEFAULT_ALLOWED_TOOLSETS: &[&str] = &[
+    "clarify",
+    "memory",
+    "session_search",
+    "todo",
+    "web",
+    "search",
+    "x_search",
+    "vision",
+    "video",
+    "image_gen",
+    "video_gen",
+    "tts",
+    "safe",
+    "mcp-assistant",
+    "assistant",
 ];
 
 const INSTRUCTIONS: &str = "Use the run_command tool from the assistant MCP server for any shell command. Commands are reviewed and may be denied by the user.";
@@ -47,6 +55,8 @@ const BUSY: &str = "Hermes กำลังทำงานอื่นอยู�
 const INTERRUPTED: &str = "Hermes หยุดทำงานกลางคัน";
 const INCOMPLETE_APPROVAL: &str = "คำขออนุมัติจาก Hermes ไม่ครบ";
 const EDITED_NOTE: &str = "\n[คำสั่งที่แก้ไขไม่ถูกส่งให้ Hermes เพราะ Hermes จะรันคำสั่งเดิม]\n";
+const NO_COMMAND_NOTE: &str = "\n[Hermes ขออนุมัติโดยไม่ระบุคำสั่ง จึงปฏิเสธ]\n";
+const NOT_REGISTERED: &str = "ยังไม่ได้ลงทะเบียนงานกับ MCP server";
 const STREAM_ENDED: &str = "การเชื่อมต่อกับ Hermes ขาดก่อนจบงาน";
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
@@ -64,7 +74,13 @@ pub enum HermesEvent {
         execution_generation: u64,
         command: String,
     },
-    /// An `approval.request` missing its id, generation or command.
+    /// An `approval.request` with id and generation but no exact command
+    /// (only prose such as `preview`/`description`). Always denied.
+    ApprovalWithoutCommand {
+        request_id: String,
+        execution_generation: u64,
+    },
+    /// An `approval.request` missing its id or generation.
     IncompleteApproval,
     Completed,
     Interrupted,
@@ -104,7 +120,8 @@ fn first_u64(v: &Value, keys: &[&str]) -> Option<u64> {
 fn approval_event(v: &Value) -> HermesEvent {
     let request_id = first_id(v, &["request_id", "id", "prompt_id"]);
     let generation = first_u64(v, &["execution_generation", "generation"]);
-    let command = first_str(v, &["command", "preview", "description"])
+    // Only an exact command is judged; prose (`preview`, `description`) is not.
+    let command = first_str(v, &["command"])
         .or_else(|| {
             v.get("args")
                 .and_then(|a| a.get("command"))
@@ -117,6 +134,12 @@ fn approval_event(v: &Value) -> HermesEvent {
                 request_id,
                 execution_generation,
                 command: command.to_string(),
+            }
+        }
+        (Some(request_id), Some(execution_generation), None) => {
+            HermesEvent::ApprovalWithoutCommand {
+                request_id,
+                execution_generation,
             }
         }
         _ => HermesEvent::IncompleteApproval,
@@ -205,12 +228,13 @@ fn bounded(s: &str, max: usize) -> &str {
 }
 
 fn http_error(status: reqwest::StatusCode, body: &str, api_key: &str) -> String {
-    let body = bounded(body, MAX_ERROR_BODY);
-    let body = if api_key.is_empty() {
+    // Redact before truncating so a cut can never leave part of the key.
+    let redacted = if api_key.is_empty() {
         body.to_string()
     } else {
         body.replace(api_key, "***")
     };
+    let body = bounded(&redacted, MAX_ERROR_BODY);
     format!("Hermes API error {}: {}", status.as_u16(), body)
 }
 
@@ -219,9 +243,8 @@ pub struct HermesProvider {
     api_key: Option<String>,
     mcp: McpServerHandle,
     commands: Arc<CommandService>,
-    forbidden_toolsets: Vec<String>,
+    allowed_toolsets: Vec<String>,
     client: reqwest::Client,
-    permits: Arc<Semaphore>,
     permit_timeout: Duration,
 }
 
@@ -232,7 +255,7 @@ impl HermesProvider {
         api_key: Option<String>,
         mcp: McpServerHandle,
         commands: Arc<CommandService>,
-        forbidden_toolsets: Vec<String>,
+        allowed_toolsets: Vec<String>,
     ) -> Self {
         let mut base_url = base_url;
         if !base_url.path().ends_with('/') {
@@ -244,13 +267,12 @@ impl HermesProvider {
             api_key,
             mcp,
             commands,
-            forbidden_toolsets,
+            allowed_toolsets,
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
                 .read_timeout(Duration::from_secs(120))
                 .build()
                 .unwrap_or_default(),
-            permits: Arc::new(Semaphore::new(1)),
             permit_timeout: DEFAULT_PERMIT_TIMEOUT,
         }
     }
@@ -271,8 +293,8 @@ impl HermesProvider {
             .map_err(|e| format!("bad base url: {e}"))
     }
 
-    /// Err with a user-facing message when a forbidden toolset is enabled or
-    /// the listing cannot be interpreted (fail closed).
+    /// Err with a user-facing message when any enabled toolset is not in the
+    /// allowlist, or the listing cannot be interpreted (fail closed).
     pub async fn check_toolsets(&self) -> std::result::Result<(), String> {
         let fail = |reason: String| format!("ตรวจสอบเครื่องมือของ Hermes ไม่ได้: {reason}");
         let url = self.url("toolsets").map_err(fail)?;
@@ -294,20 +316,20 @@ impl HermesProvider {
             .map_err(|e| fail(e.without_url().to_string()))?;
         let v: Value = serde_json::from_str(&text).map_err(|e| fail(e.to_string()))?;
         let toolsets = parse_toolsets(&v).map_err(fail)?;
-        let enabled: Vec<&str> = self
-            .forbidden_toolsets
+        let allowed: Vec<String> = self
+            .allowed_toolsets
             .iter()
-            .filter(|f| {
-                toolsets
-                    .iter()
-                    .any(|(n, on)| *on && n.eq_ignore_ascii_case(f))
-            })
-            .map(String::as_str)
+            .map(|a| a.trim().to_ascii_lowercase())
             .collect();
-        if enabled.is_empty() {
+        let offending: Vec<&str> = toolsets
+            .iter()
+            .filter(|(name, on)| *on && !allowed.contains(&name.trim().to_ascii_lowercase()))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if offending.is_empty() {
             Ok(())
         } else {
-            Err(format!("ต้องปิด toolset: {}", enabled.join(", ")))
+            Err(format!("ต้องปิด toolset: {}", offending.join(", ")))
         }
     }
 
@@ -351,16 +373,16 @@ impl ChatProvider for HermesProvider {
             .ok_or_else(|| ProviderError::Other(NO_KEY.into()))?
             .to_string();
         if self.mcp.context(&req.turn_token).is_none() {
-            return Err(ProviderError::Other(
-                "turn is not registered with the MCP server".into(),
-            ));
+            return Err(ProviderError::Other(NOT_REGISTERED.into()));
         }
-        let permit =
-            tokio::time::timeout(self.permit_timeout, self.permits.clone().acquire_owned())
-                .await
-                .ok()
-                .and_then(|p| p.ok())
-                .ok_or_else(|| ProviderError::Other(BUSY.into()))?;
+        let permit = tokio::time::timeout(
+            self.permit_timeout,
+            self.mcp.hermes_turn_lock().acquire_owned(),
+        )
+        .await
+        .ok()
+        .and_then(|p| p.ok())
+        .ok_or_else(|| ProviderError::Other(BUSY.into()))?;
         self.check_toolsets().await.map_err(ProviderError::Other)?;
 
         let (history, input) = to_hermes(&trim_history(&req.history, DEFAULT_MAX_HISTORY_CHARS));
@@ -439,13 +461,13 @@ impl RunApi {
         let _ = tokio::time::timeout(STOP_TIMEOUT, send).await;
     }
 
-    /// Ok(true) answered, Ok(false) stale (409), Err otherwise.
+    /// Ok when answered or stale (409, ignored); Err otherwise.
     async fn answer(
         &self,
         request_id: &str,
         generation: u64,
         choice: &str,
-    ) -> std::result::Result<bool, String> {
+    ) -> std::result::Result<(), String> {
         let url = self.url("approval")?;
         let resp = self
             .client
@@ -461,13 +483,13 @@ impl RunApi {
             .map_err(|e| format!("request failed: {}", e.without_url()))?;
         let status = resp.status();
         if status == reqwest::StatusCode::CONFLICT {
-            return Ok(false);
+            return Ok(());
         }
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             return Err(http_error(status, &text, &self.api_key));
         }
-        Ok(true)
+        Ok(())
     }
 }
 
@@ -483,14 +505,16 @@ async fn handle_approval(
     command: String,
 ) -> Step {
     let mut events = Vec::new();
-    let mut approved = None;
     let choice = match mcp.context(&token) {
         None => "deny",
         Some(ctx) => {
             let auth = commands.authorize(&ctx, &command).await;
             match &auth {
                 Authorization::Approved { approval, .. } if *approval != Approval::UserEdited => {
-                    approved = Some((ctx, auth));
+                    // Record before answering: once Hermes has `once` it may run
+                    // the action, and a cancel/abort after that point must not
+                    // leave it without an audit row.
+                    commands.record_external(&ctx, &auth).await;
                     "once"
                 }
                 Authorization::Approved { .. } => {
@@ -502,17 +526,19 @@ async fn handle_approval(
             }
         }
     };
-    match api.answer(&request_id, generation, choice).await {
-        Ok(true) => {
-            if let Some((ctx, auth)) = approved {
-                commands.record_external(&ctx, &auth).await;
-            }
-            Step {
-                events,
-                finish: false,
-            }
-        }
-        Ok(false) => Step {
+    answer_step(&api, &request_id, generation, choice, events).await
+}
+
+/// POST the answer. A 409 (stale) is ignored; other failures stop the run.
+async fn answer_step(
+    api: &RunApi,
+    request_id: &str,
+    generation: u64,
+    choice: &str,
+    mut events: Vec<ChatEvent>,
+) -> Step {
+    match api.answer(request_id, generation, choice).await {
+        Ok(()) => Step {
             events,
             finish: false,
         },
@@ -652,6 +678,19 @@ impl HermesTurn {
                 self.finish();
             }
             HermesEvent::IncompleteApproval => self.fail_and_stop(INCOMPLETE_APPROVAL.into()),
+            HermesEvent::ApprovalWithoutCommand {
+                request_id,
+                execution_generation,
+            } => {
+                let Some(api) = self.api() else {
+                    self.fail_and_stop("run id missing".into());
+                    return;
+                };
+                self.pending = Some(tokio::spawn(async move {
+                    let events = vec![ChatEvent::TextDelta(NO_COMMAND_NOTE.into())];
+                    answer_step(&api, &request_id, execution_generation, "deny", events).await
+                }));
+            }
             HermesEvent::ApprovalRequest {
                 request_id,
                 execution_generation,

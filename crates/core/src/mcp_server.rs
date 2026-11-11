@@ -68,6 +68,7 @@ struct Inner {
     hermes_key: String,
     turns: Mutex<HashMap<String, (u64, CommandContext)>>,
     active_hermes: Mutex<Option<String>>,
+    hermes_lock: Arc<tokio::sync::Semaphore>,
     next_id: AtomicU64,
     shutdown: CancellationToken,
 }
@@ -128,6 +129,7 @@ impl McpServer {
             hermes_key,
             turns: Mutex::new(HashMap::new()),
             active_hermes: Mutex::new(None),
+            hermes_lock: Arc::new(tokio::sync::Semaphore::new(1)),
             next_id: AtomicU64::new(1),
             shutdown: shutdown.clone(),
         });
@@ -258,6 +260,13 @@ impl McpServerHandle {
 
     pub fn set_active_hermes_turn(&self, token: Option<String>) {
         *self.inner.active_hermes.lock().unwrap() = token;
+    }
+
+    /// Shared lock making Hermes turns exclusive: the Hermes route binds to a
+    /// single active turn, so every provider using this server must hold a
+    /// permit from this one semaphore for the life of its turn.
+    pub fn hermes_turn_lock(&self) -> Arc<tokio::sync::Semaphore> {
+        self.inner.hermes_lock.clone()
     }
 
     /// The turn token Hermes calls are currently bound to, if any.

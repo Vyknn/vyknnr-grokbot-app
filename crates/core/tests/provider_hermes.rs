@@ -3,7 +3,7 @@ use assistant_core::decision::gate::{CommandCheck, CommandChecker};
 use assistant_core::decision::policy::{CommandVerdict, DecisionSource};
 use assistant_core::mcp_server::{McpServer, McpServerHandle, TurnGuard};
 use assistant_core::providers::hermes::{
-    parse_sse, HermesEvent, HermesProvider, DEFAULT_FORBIDDEN_TOOLSETS,
+    parse_sse, HermesEvent, HermesProvider, DEFAULT_ALLOWED_TOOLSETS,
 };
 use assistant_core::providers::{ChatProvider, ProviderTurn};
 use assistant_core::runner::RunLimits;
@@ -137,7 +137,7 @@ fn provider(r: &Rig, key: Option<&str>) -> HermesProvider {
         key.map(str::to_string),
         r.mcp.clone(),
         r.commands.clone(),
-        DEFAULT_FORBIDDEN_TOOLSETS
+        DEFAULT_ALLOWED_TOOLSETS
             .iter()
             .map(|s| s.to_string())
             .collect(),
@@ -303,6 +303,10 @@ fn sse_skips_keepalive_and_parses_events() {
                 execution_generation: 4,
                 command: "git push".into(),
             },
+            &HermesEvent::ApprovalWithoutCommand {
+                request_id: "prompt_3".into(),
+                execution_generation: 5,
+            },
             &HermesEvent::Delta(" Done.".into()),
             &HermesEvent::Completed,
         ]
@@ -385,6 +389,54 @@ async fn forbidden_toolset_enabled_is_unavailable() {
     let err = p.start(req(r.conv)).await.err().expect("start must fail");
     assert!(err.to_string().contains("terminal"));
     assert_eq!(r.mcp.active_hermes_turn(), None);
+}
+
+#[tokio::test]
+async fn allowlist_rejects_composites_presets_and_unknown_names() {
+    let cases = [
+        (
+            json!([{"name":"coding","enabled":true},{"name":"web","enabled":true}]),
+            "coding",
+        ),
+        (json!({"hermes-api-server": true}), "hermes-api-server"),
+        (
+            json!({"terminal_tools": {"enabled": true}}),
+            "terminal_tools",
+        ),
+        (
+            json!([{"name":"code-execution","enabled":true}]),
+            "code-execution",
+        ),
+        (json!({"all": true, "hermes-cli": true}), "all, hermes-cli"),
+    ];
+    for (body, offending) in cases {
+        let r = rig(CommandVerdict::AutoRun, ApprovalResponse::Deny).await;
+        mount_health(&r.server).await;
+        mount_toolsets(&r.server, body.clone()).await;
+        assert_eq!(
+            provider(&r, Some(API_KEY)).availability().await,
+            Availability::Unavailable(format!("ต้องปิด toolset: {offending}")),
+            "{body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn allowlist_ready_cases() {
+    let cases = [
+        json!([{"name":"web","enabled":true},{"name":"memory","enabled":true},{"name":"terminal","enabled":false},{"name":"coding","enabled":false}]),
+        json!({"Web": true, " Todo ": true, "file": false}),
+    ];
+    for body in cases {
+        let r = rig(CommandVerdict::AutoRun, ApprovalResponse::Deny).await;
+        mount_health(&r.server).await;
+        mount_toolsets(&r.server, body.clone()).await;
+        assert_eq!(
+            provider(&r, Some(API_KEY)).availability().await,
+            Availability::Ready,
+            "{body}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -846,8 +898,129 @@ async fn start_without_registered_context_fails() {
     mount_safe_toolsets(&r.server).await;
     let mut rq = req(r.conv);
     rq.turn_token = "unregistered".into();
-    assert!(provider(&r, Some(API_KEY)).start(rq).await.is_err());
+    let err = provider(&r, Some(API_KEY))
+        .start(rq)
+        .await
+        .err()
+        .expect("must fail");
+    assert_eq!(err.to_string(), "ยังไม่ได้ลงทะเบียนงานกับ MCP server");
     assert_eq!(r.mcp.active_hermes_turn(), None);
+}
+
+#[tokio::test]
+async fn providers_sharing_mcp_handle_share_turn_lock() {
+    let r = rig(CommandVerdict::AutoRun, ApprovalResponse::Deny).await;
+    mount_safe_toolsets(&r.server).await;
+    mount_run(&r.server, sse(&[completed()])).await;
+    let a = provider(&r, Some(API_KEY)).with_permit_timeout(Duration::from_millis(200));
+    let b = provider(&r, Some(API_KEY)).with_permit_timeout(Duration::from_millis(200));
+    let first = a.start(req(r.conv)).await.unwrap();
+    let err = b
+        .start(req(r.conv))
+        .await
+        .err()
+        .expect("second provider must not start while first turn alive");
+    assert_eq!(err.to_string(), "Hermes กำลังทำงานอื่นอยู่");
+    drop(first);
+    let mut second = b.start(req(r.conv)).await.unwrap();
+    assert_eq!(collect(&mut second).await, vec![ChatEvent::Done]);
+}
+
+#[tokio::test]
+async fn approval_recorded_before_answer_survives_cancel() {
+    let r = rig(CommandVerdict::AskUser, ApprovalResponse::Run).await;
+    mount_safe_toolsets(&r.server).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/runs/run_abc123/approval"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"ok":true}))
+                .set_delay(Duration::from_secs(5)),
+        )
+        .mount(&r.server)
+        .await;
+    mount_run(
+        &r.server,
+        sse(&[approval("p1", 1, "Remove-Item x"), completed()]),
+    )
+    .await;
+    let mut turn = provider(&r, Some(API_KEY))
+        .start(req(r.conv))
+        .await
+        .unwrap();
+    // next() blocks while the delayed approval POST is in flight.
+    let waited = tokio::time::timeout(Duration::from_millis(500), turn.next()).await;
+    assert!(
+        waited.is_err(),
+        "next() should be waiting on the approval POST"
+    );
+    // The approval POST has been sent, so recording already happened.
+    assert_eq!(count(&r.server, "/v1/runs/run_abc123/approval").await, 1);
+    turn.cancel().await;
+    drop(turn);
+    let cmds = r.store.commands(r.conv).unwrap();
+    assert_eq!(cmds.len(), 1, "{cmds:?}");
+    assert_eq!(cmds[0].command, "Remove-Item x");
+    assert_eq!(cmds[0].approval, Approval::User);
+}
+
+#[tokio::test]
+async fn approval_without_exact_command_is_denied_without_authorize() {
+    let r = rig(CommandVerdict::AutoRun, ApprovalResponse::Run).await;
+    mount_safe_toolsets(&r.server).await;
+    mount_approval(&r.server, 200).await;
+    mount_run(
+        &r.server,
+        sse(&[
+            (
+                "approval.request",
+                json!({"request_id":"p3","execution_generation":2,"preview":"delete some files","description":"cleanup"}),
+            ),
+            completed(),
+        ]),
+    )
+    .await;
+    let mut turn = provider(&r, Some(API_KEY))
+        .start(req(r.conv))
+        .await
+        .unwrap();
+    assert_eq!(
+        collect(&mut turn).await,
+        vec![
+            ChatEvent::TextDelta("\n[Hermes ขออนุมัติโดยไม่ระบุคำสั่ง จึงปฏิเสธ]\n".into()),
+            ChatEvent::Done
+        ]
+    );
+    assert!(r.approver.calls.lock().unwrap().is_empty());
+    assert!(r.store.commands(r.conv).unwrap().is_empty());
+    let answers = bodies(&r.server, "/v1/runs/run_abc123/approval").await;
+    assert_eq!(
+        answers,
+        vec![json!({"request_id":"p3","execution_generation":2,"choice":"deny"})]
+    );
+}
+
+#[tokio::test]
+async fn key_redacted_before_truncation() {
+    let r = rig(CommandVerdict::AutoRun, ApprovalResponse::Deny).await;
+    mount_safe_toolsets(&r.server).await;
+    // Key straddles the 2 KiB cut.
+    let body = format!("{}{API_KEY}{}", "a".repeat(2040), "b".repeat(100));
+    Mock::given(method("POST"))
+        .and(path("/v1/runs"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(body))
+        .mount(&r.server)
+        .await;
+    let mut turn = provider(&r, Some(API_KEY))
+        .start(req(r.conv))
+        .await
+        .unwrap();
+    let evs = collect(&mut turn).await;
+    let ChatEvent::Error(m) = &evs[0] else {
+        panic!("{evs:?}")
+    };
+    assert!(!m.contains(&API_KEY[..8]), "partial key leaked: {m}");
+    assert!(m.contains("***"));
 }
 
 #[tokio::test]
