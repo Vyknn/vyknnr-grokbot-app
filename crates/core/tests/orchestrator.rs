@@ -1005,3 +1005,17 @@ async fn mcp_command_from_cli_turn_is_in_history_for_next_provider() {
     assert!(cmd.content.contains("> Write-Output via-mcp\nexit: 0\n"));
     assert!(cmd.content.contains("via-mcp"));
 }
+
+#[tokio::test]
+async fn whitespace_only_assistant_reply_is_not_stored() {
+    let api = ScriptedProvider::new(ProviderId::Api);
+    api.script(vec![text("\n  \n"), done()]);
+    let r = rig(Opts::new(vec![api.clone()])).await;
+    let out = r
+        .orch
+        .send(r.conv, "hi".into(), ProviderChoice::Auto)
+        .await
+        .unwrap();
+    assert!(matches!(out, TurnOutcome::Completed { .. }));
+    assert_eq!(roles(&r.store, r.conv), vec![Role::User]);
+}

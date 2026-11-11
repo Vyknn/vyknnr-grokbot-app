@@ -370,7 +370,7 @@ impl Orchestrator {
     }
 
     fn store_assistant(&self, conv_id: i64, provider: ProviderId, text: &str) -> Result<()> {
-        if !text.is_empty() {
+        if !text.trim().is_empty() {
             self.store.append_message(
                 conv_id,
                 NewMessage {

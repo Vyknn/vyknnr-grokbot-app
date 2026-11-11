@@ -384,7 +384,9 @@ impl AnthropicTurn {
         let mut awaiting = Vec::new();
         for (_, b) in &self.blocks {
             match b {
-                Block::Text(t) if !t.is_empty() => content.push(json!({"type":"text","text":t})),
+                Block::Text(t) if !t.trim().is_empty() => {
+                    content.push(json!({"type":"text","text":t}))
+                }
                 Block::Text(_) => {}
                 Block::Tool { id, name, json } => {
                     let parsed: Option<Value> = serde_json::from_str(json).ok();

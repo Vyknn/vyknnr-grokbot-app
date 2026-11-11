@@ -193,6 +193,43 @@ async fn tool_use_round_trip() {
 }
 
 #[tokio::test]
+async fn whitespace_only_text_block_is_not_echoed() {
+    let server = MockServer::start().await;
+    let first = sse(&[
+        text_delta(0, "\n\n  "),
+        block_stop(0),
+        tool_start(1, "toolu_1", "run_command"),
+        json_delta(1, "{\"command\":\"dir\"}"),
+        block_stop(1),
+        msg_delta("tool_use"),
+        stop(),
+    ]);
+    let second = sse(&[text_delta(0, "done"), msg_delta("end_turn"), stop()]);
+    mount_two_rounds(&server, first, second).await;
+    let mut turn = provider(&server).start(req()).await.unwrap();
+    loop {
+        match turn.next().await {
+            Some(ChatEvent::CommandProposed { .. }) => break,
+            Some(ChatEvent::TextDelta(_)) => {}
+            e => panic!("{e:?}"),
+        }
+    }
+    turn.submit_command_result("toolu_1", "OUT".into())
+        .await
+        .unwrap();
+    drain(&mut turn).await;
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 2);
+    let b: Value = reqs[1].body_json().unwrap();
+    let m = b["messages"].as_array().unwrap();
+    let assistant = &m[m.len() - 2];
+    assert_eq!(assistant["role"], "assistant");
+    let content = assistant["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1, "{content:?}");
+    assert_eq!(content[0]["type"], "tool_use");
+}
+
+#[tokio::test]
 async fn invalid_tool_input_yields_error_result_without_proposal() {
     let server = MockServer::start().await;
     let first = sse(&[

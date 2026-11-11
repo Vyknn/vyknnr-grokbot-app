@@ -32,7 +32,7 @@ pub fn format_denied_command(command: &str) -> String {
 fn translate(history: &[Message]) -> Vec<(&'static str, String)> {
     let mut out: Vec<(&'static str, String)> = Vec::new();
     for m in history {
-        if m.content.is_empty() {
+        if m.content.trim().is_empty() {
             continue;
         }
         let (role, content) = match m.role {
@@ -73,7 +73,7 @@ pub fn to_hermes(history: &[Message]) -> (Vec<Value>, String) {
     let hist = to_values(translate(&history[..idx]));
     let mut input = history[idx].content.clone();
     for m in &history[idx + 1..] {
-        if m.content.is_empty() {
+        if m.content.trim().is_empty() {
             continue;
         }
         let extra = match m.role {
@@ -176,6 +176,22 @@ mod tests {
         let v = to_anthropic(&h);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0]["content"], "[หมายเหตุ] สลับ\n\nq");
+    }
+
+    #[test]
+    fn whitespace_only_messages_are_skipped() {
+        let h = vec![
+            msg(Role::User, None, "q1"),
+            msg(Role::Assistant, Some(ProviderId::Api), "  \n\t "),
+            msg(Role::User, None, "q2"),
+            msg(Role::Notice, None, " "),
+        ];
+        let v = to_anthropic(&h);
+        assert_eq!(roles(&v), ["user"]);
+        assert_eq!(v[0]["content"], "q1\n\nq2");
+        let (hist, input) = to_hermes(&h);
+        assert_eq!(roles(&hist), ["user"]);
+        assert_eq!(input, "q2");
     }
 
     #[test]
