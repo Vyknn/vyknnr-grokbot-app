@@ -9,3 +9,4 @@ pub mod mcp_server;
 pub mod providers;
 pub mod runner;
 pub mod store;
+pub mod settings;
