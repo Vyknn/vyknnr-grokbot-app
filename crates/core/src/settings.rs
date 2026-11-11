@@ -468,8 +468,10 @@ mod tests {
             assert!(e.contains(bad.trim()), "{bad}: {e}");
             assert!(e.contains("hermes_allowed_toolsets"), "{e}");
         }
-        let mut s = Settings::default();
-        s.hermes_allowed_toolsets = vec!["web".into(), "terminal".into(), "file".into()];
+        let s = Settings {
+            hermes_allowed_toolsets: vec!["web".into(), "terminal".into(), "file".into()],
+            ..Settings::default()
+        };
         assert_eq!(
             s.validate().unwrap_err(),
             "hermes_allowed_toolsets ห้ามมี toolset ที่รันคำสั่งหรือแตะไฟล์เอง: terminal, file"
