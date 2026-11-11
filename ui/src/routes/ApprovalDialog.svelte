@@ -13,34 +13,44 @@
     onanswer: (id: string, a: ApprovalAnswer) => void;
   } = $props();
 
+  /** Clicks, Enter and Space are ignored this long after the dialog appears. */
+  const ARM_DELAY_MS = 500;
+
+  // One instance per request (the host keys it by id), so nothing resets here.
+  // svelte-ignore state_referenced_locally
+  let edited = $state(request.command);
   let editing = $state(false);
-  let edited = $state("");
+  let armed = $state(false);
   let dialog: HTMLDialogElement | undefined = $state();
   let answered = false;
 
   $effect(() => {
-    // New request: reset and open.
-    void request.id;
-    editing = false;
-    edited = request.command;
-    answered = false;
     if (dialog && !dialog.open) dialog.showModal();
+    const t = setTimeout(() => (armed = true), ARM_DELAY_MS);
+    return () => clearTimeout(t);
   });
 
-  function answer(a: ApprovalAnswer) {
+  function send(a: ApprovalAnswer) {
     if (answered) return;
     answered = true;
     onanswer(request.id, a);
   }
 
-  // Esc and any other close are a Deny.
+  /** Button answers: ignored until armed. */
+  function answer(a: ApprovalAnswer) {
+    if (!armed) return;
+    if (typeof a === "object" && a.edited.trim() === "") return;
+    send(a);
+  }
+
+  // Esc and any other close are a Deny, immediately (even before armed).
   function onclose() {
-    answer("deny");
+    send("deny");
   }
 
   function oncancel(e: Event) {
     e.preventDefault();
-    answer("deny");
+    send("deny");
   }
 
   const c = $derived(request.check);
@@ -80,18 +90,18 @@
   </dl>
 
   <footer>
-    <button type="button" class="deny" onclick={() => answer("deny")}>ปฏิเสธ</button>
+    <button type="button" class="deny" disabled={!armed} onclick={() => answer("deny")}>ปฏิเสธ</button>
     {#if editing}
-      <button type="button" onclick={() => (editing = false)}>ยกเลิกการแก้</button>
+      <button type="button" disabled={!armed} onclick={() => (editing = false)}>ยกเลิกการแก้</button>
       <button
         type="button"
         class="run"
-        disabled={edited.trim() === ""}
+        disabled={!armed || edited.trim() === ""}
         onclick={() => answer({ edited })}>รันคำสั่งที่แก้</button
       >
     {:else}
-      <button type="button" onclick={() => (editing = true)}>แก้ไข</button>
-      <button type="button" class="run" onclick={() => answer("run")}>รัน</button>
+      <button type="button" disabled={!armed} onclick={() => (editing = true)}>แก้ไข</button>
+      <button type="button" class="run" disabled={!armed} onclick={() => answer("run")}>รัน</button>
     {/if}
   </footer>
 </dialog>

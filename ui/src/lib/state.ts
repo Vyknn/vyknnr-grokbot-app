@@ -188,6 +188,43 @@ export function applyEvent(s: ChatState, ev: AppEvent): ChatState {
   return s;
 }
 
+/** Shape of a stored Route decision payload. */
+interface RoutePayload {
+  outcome?: { auto?: ProviderId; ask_user?: { ranked: [ProviderId, number][] } };
+  source?: DecisionSource;
+  probability?: number | null;
+}
+
+const ALL_PROVIDERS: ProviderId[] = ["hermes", "claude_cli", "api"];
+
+export interface PendingChoice {
+  userMessageId: number;
+  ranked: [ProviderId, number][];
+}
+
+/**
+ * A provider choice still owed for this conversation: the last stored
+ * message is the user's and no turn is running. Uses Jev's stored ranking
+ * when there is one, otherwise offers every provider.
+ */
+export function pendingChoice(messages: Message[], decisions: DecisionRecord[], busy: boolean): PendingChoice | null {
+  if (busy) return null;
+  const last = messages[messages.length - 1];
+  if (!last || last.role !== "user") return null;
+  let ranked: [ProviderId, number][] | null = null;
+  for (const d of decisions) {
+    if (d.kind !== "route" || d.message_id !== last.id) continue;
+    const r = (d.payload as RoutePayload | null)?.outcome?.ask_user?.ranked;
+    if (r) ranked = r;
+  }
+  return { userMessageId: last.id, ranked: ranked ?? ALL_PROVIDERS.map((p) => [p, 0]) };
+}
+
+/** Remove one item (e.g. an optimistic message whose send failed). */
+export function dropItem(s: ChatState, key: string): ChatState {
+  return { ...s, streaming: false, items: endStreaming(s.items.filter((i) => i.key !== key)) };
+}
+
 /** Add a local notice (e.g. a command error). */
 export function pushNotice(s: ChatState, text: string): ChatState {
   const [k, seq] = key(s, "n");
@@ -213,17 +250,14 @@ export function fromStored(
   const rows: Timed[] = [];
   let order = 0;
   // Route decision per user message: the replies after it get its badge.
-  const routeSource = new Map<number, DecisionSource>();
+  const routeBadge = new Map<number, Badge>();
   for (const d of decisions) {
-    const src = d.kind === "route" ? (d.payload as { source?: DecisionSource } | null)?.source : undefined;
-    if (src) routeSource.set(d.message_id, src);
+    const p = d.kind === "route" ? (d.payload as RoutePayload | null) : null;
+    if (p?.source) routeBadge.set(d.message_id, { source: p.source, probability: p.probability ?? null });
   }
   let badge: Badge | null = null;
   for (const m of messages) {
-    if (m.role === "user") {
-      const src = routeSource.get(m.id);
-      badge = src ? { source: src, probability: null } : null;
-    }
+    if (m.role === "user") badge = routeBadge.get(m.id) ?? null;
     if (m.role === "command_result") continue;
     const item: ChatItem =
       m.role === "notice"

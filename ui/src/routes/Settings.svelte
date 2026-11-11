@@ -46,12 +46,14 @@
 
   async function setKey(name: SecretName, value: string) {
     try {
-      await api.setSecret(name, value);
-      keyInput[name] = "";
+      await api.setSecret(name, value.trim());
       await refreshKeys();
       onrefreshstatus();
     } catch (e) {
       onerror(errorText(e));
+    } finally {
+      // Never leave a key sitting in the input, saved or not.
+      keyInput[name] = "";
     }
   }
 

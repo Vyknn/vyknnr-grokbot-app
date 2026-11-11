@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { api, errorText, events, type ApprovalAnswer } from "./lib/api";
+  import { listenerBag } from "./lib/listeners";
+  import type { PendingChoice } from "./lib/state";
   import type { ApprovalRequest, Conversation, ProviderStatus } from "./lib/types";
-  import ApprovalDialog from "./routes/ApprovalDialog.svelte";
+  import ApprovalHost from "./routes/ApprovalHost.svelte";
   import Chat from "./routes/Chat.svelte";
   import Settings from "./routes/Settings.svelte";
   import Sidebar from "./routes/Sidebar.svelte";
@@ -14,10 +16,11 @@
   let approvals: ApprovalRequest[] = $state([]);
   let toast = $state("");
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
-  let unlisten: (() => void)[] = [];
+  /** Provider choices still owed, per conversation (survive switching chats). */
+  let choices: Record<number, PendingChoice | null> = $state({});
+  const listeners = listenerBag();
 
   const current = $derived(conversations.find((c) => c.id === selected) ?? null);
-  const approval = $derived(approvals[0] ?? null);
 
   function showError(msg: string) {
     toast = msg;
@@ -55,12 +58,20 @@
   }
 
   onMount(async () => {
-    unlisten.push(await events.onApproval((r) => (approvals = [...approvals, r])));
-    unlisten.push(await events.onApprovalClosed((id) => (approvals = approvals.filter((r) => r.id !== id))));
-    unlisten.push(
-      await events.onEvent((ev) => {
+    void listeners.add(events.onApproval((r) => (approvals = [...approvals, r])));
+    void listeners.add(events.onApprovalClosed((id) => (approvals = approvals.filter((r) => r.id !== id))));
+    void listeners.add(
+      events.onEvent((ev) => {
         // Keep the sidebar order fresh when a turn ends.
         if (ev.kind === "turn_finished" || ev.kind === "turn_failed") refreshList();
+      }),
+    );
+    // Record a choice even when that chat is not open.
+    void listeners.add(
+      events.onTurnOutcome((o) => {
+        if (o.outcome?.kind === "needs_provider_choice") {
+          choices[o.conversation_id] = { userMessageId: o.outcome.user_message_id, ranked: o.outcome.ranked };
+        }
       }),
     );
     await refreshList();
@@ -68,7 +79,7 @@
     await refreshStatus();
   });
 
-  onDestroy(() => unlisten.forEach((u) => u()));
+  onDestroy(() => listeners.dispose());
 </script>
 
 <div class="app">
@@ -96,7 +107,13 @@
       <Settings {status} onrefreshstatus={refreshStatus} onerror={showError} />
     {:else if current}
       {#key current.id}
-        <Chat conversation={current} {status} onerror={showError} />
+        <Chat
+          conversation={current}
+          {status}
+          choice={choices[current.id] ?? null}
+          onchoice={(c) => (choices[current.id] = c)}
+          onerror={showError}
+        />
       {/key}
     {:else}
       <div class="welcome">
@@ -108,13 +125,11 @@
   </main>
 </div>
 
-{#if approval}
-  <ApprovalDialog
-    request={approval}
-    conversationTitle={conversations.find((c) => c.id === approval.conversation_id)?.title ?? ""}
-    onanswer={answer}
-  />
-{/if}
+<ApprovalHost
+  requests={approvals}
+  titleFor={(id) => conversations.find((c) => c.id === id)?.title ?? ""}
+  onanswer={answer}
+/>
 
 {#if toast}
   <div class="toast" role="alert">

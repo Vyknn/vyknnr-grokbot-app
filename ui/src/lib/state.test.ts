@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { applyEvent, emptyChat, fromStored, pushUser, type ChatState } from "./state";
+import { sourceText } from "./format";
+import { applyEvent, dropItem, emptyChat, fromStored, pendingChoice, pushUser, type ChatState } from "./state";
 import type { AppEvent } from "./types";
 
 const C = 1;
@@ -56,14 +57,12 @@ describe("applyEvent", () => {
   });
 
   test("RouteDecided sets badge", () => {
+    // Exactly what core emits for a Jev Auto route (serde of AppEvent::RouteDecided).
+    const ev = JSON.parse(
+      '{"kind":"route_decided","conversation_id":1,"provider":"claude_cli","source":{"kind":"jev","model":"jev-1"},"probability":0.82}',
+    ) as AppEvent;
     const s = run(start(), [
-      {
-        kind: "route_decided",
-        conversation_id: C,
-        provider: "claude_cli",
-        source: { kind: "jev", model: "jev-1" },
-        probability: 0.82,
-      },
+      ev,
       { kind: "assistant_delta", conversation_id: C, text: "ok" },
     ]);
     expect(s.route?.provider).toBe("claude_cli");
@@ -72,6 +71,17 @@ describe("applyEvent", () => {
     expect(last.provider).toBe("claude_cli");
     expect(last.badge?.probability).toBe(0.82);
     expect(last.badge?.source.kind).toBe("jev");
+    expect(sourceText(last.badge!.source, last.badge!.probability)).toBe("Jev 82%");
+  });
+
+  test("RouteDecided without a probability shows the model", () => {
+    const s = run(start(), [
+      { kind: "route_decided", conversation_id: C, provider: "api", source: { kind: "manual" }, probability: null },
+      { kind: "assistant_delta", conversation_id: C, text: "x" },
+    ]);
+    const last = s.items[s.items.length - 1];
+    if (last.type !== "message") throw new Error();
+    expect(sourceText(last.badge!.source, last.badge!.probability)).toBe("ผู้ใช้เลือก");
   });
 
   test("CommandStarted/Finished lifecycle", () => {
@@ -150,5 +160,60 @@ describe("fromStored", () => {
     if (last.type !== "message") throw new Error();
     expect(last.badge?.source.kind).toBe("jev");
     expect(JSON.stringify(s)).not.toContain("[raw]");
+  });
+});
+
+describe("pendingChoice", () => {
+  const t = (n: number) => `2026-11-11T00:00:0${n}.000Z`;
+  const user = { id: 4, conversation_id: C, role: "user" as const, provider: null, content: "q", created_at: t(1) };
+  const reply = { id: 5, conversation_id: C, role: "assistant" as const, provider: "api" as const, content: "a", created_at: t(2) };
+
+  test("last message is a user message and not busy: offers the stored ranking", () => {
+    const d = [
+      {
+        id: 1, message_id: 4, kind: "route" as const, created_at: t(1),
+        payload: { outcome: { ask_user: { ranked: [["hermes", 0.6], ["api", 0.3]] } }, source: { kind: "jev", model: "m" }, probability: null },
+      },
+    ];
+    expect(pendingChoice([user], d, false)).toEqual({ userMessageId: 4, ranked: [["hermes", 0.6], ["api", 0.3]] });
+  });
+
+  test("without a stored ranking every provider is offered", () => {
+    expect(pendingChoice([user], [], false)?.ranked.map((r) => r[0])).toEqual(["hermes", "claude_cli", "api"]);
+  });
+
+  test("nothing pending when busy or answered", () => {
+    expect(pendingChoice([user], [], true)).toBeNull();
+    expect(pendingChoice([user, reply], [], false)).toBeNull();
+    expect(pendingChoice([], [], false)).toBeNull();
+  });
+});
+
+describe("dropItem", () => {
+  test("removes the optimistic user message and stops working", () => {
+    const s = start();
+    const key = s.items[s.items.length - 1].key;
+    const d = dropItem(s, key);
+    expect(d.items).toHaveLength(0);
+    expect(d.streaming).toBe(false);
+  });
+});
+
+describe("badges carry Jev's probability", () => {
+  test("stored route decisions keep the probability", () => {
+    const t = (n: number) => `2026-11-11T00:00:0${n}.000Z`;
+    const s = fromStored(
+      C,
+      [
+        { id: 1, conversation_id: C, role: "user", provider: null, content: "q", created_at: t(1) },
+        { id: 2, conversation_id: C, role: "assistant", provider: "hermes", content: "a", created_at: t(2) },
+      ],
+      [],
+      [{ id: 1, message_id: 1, kind: "route", created_at: t(1), payload: { outcome: { auto: "hermes" }, source: { kind: "jev", model: "m" }, probability: 0.82 } }],
+    );
+    const a = s.items[1];
+    if (a.type !== "message") throw new Error();
+    expect(a.badge?.probability).toBe(0.82);
+    expect(sourceText(a.badge!.source, a.badge!.probability)).toBe("Jev 82%");
   });
 });

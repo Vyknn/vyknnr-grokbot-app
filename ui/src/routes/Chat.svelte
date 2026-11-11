@@ -1,15 +1,19 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
+  import { listenerBag } from "../lib/listeners";
   import { api, errorText, events, type ProviderPick } from "../lib/api";
   import { APPROVAL_TEXT, pct, sourceText } from "../lib/format";
   import {
     applyEvent,
+    dropItem,
     emptyChat,
     fromStored,
+    pendingChoice,
     pushNotice,
     pushUser,
     stopWorking,
     type ChatState,
+    type PendingChoice,
   } from "../lib/state";
   import {
     PROVIDER_LABEL,
@@ -23,28 +27,33 @@
   let {
     conversation,
     status,
+    choice,
+    onchoice,
     onerror,
   }: {
     conversation: Conversation;
     status: ProviderStatus | null;
+    /** Provider choice owed for this conversation (kept by App across chat switches). */
+    choice: PendingChoice | null;
+    onchoice: (c: PendingChoice | null) => void;
     onerror: (msg: string) => void;
   } = $props();
 
   let chat: ChatState = $state(emptyChat(0));
   let draft = $state("");
   let provider: ProviderPick = $state("auto");
-  let choice: { userMessageId: number; ranked: [ProviderId, number][] } | null = $state(null);
   let scroller: HTMLElement | undefined = $state();
   let exporting = $state(false);
-  let unlisten: (() => void)[] = [];
+  const listeners = listenerBag();
 
   async function load(id: number) {
-    choice = null;
     try {
       const d = await api.getConversationDetail(id);
       if (conversation.id !== id) return;
       chat = fromStored(id, d.messages, d.commands, d.decisions);
       if (d.busy) chat = { ...chat, streaming: true };
+      // Re-offer a choice the user has not made yet (derived from stored data).
+      onchoice(pendingChoice(d.messages, d.decisions, d.busy));
       await scrollDown();
     } catch (e) {
       onerror(errorText(e));
@@ -76,7 +85,7 @@
     if (!out) return;
     if (out.kind === "needs_provider_choice") {
       chat = stopWorking(chat);
-      choice = { userMessageId: out.user_message_id, ranked: out.ranked };
+      onchoice({ userMessageId: out.user_message_id, ranked: out.ranked });
       await scrollDown();
     } else if (out.kind === "completed" || out.kind === "cancelled") {
       await load(conversation.id);
@@ -86,42 +95,47 @@
     }
   }
 
-  onMount(async () => {
-    unlisten.push(
-      await events.onEvent(async (ev) => {
+  onMount(() => {
+    void listeners.add(
+      events.onEvent(async (ev) => {
         const stick = nearBottom();
         chat = applyEvent(chat, ev);
         if (stick) await scrollDown();
       }),
     );
-    unlisten.push(await events.onTurnOutcome(onOutcome));
+    void listeners.add(events.onTurnOutcome(onOutcome));
   });
 
-  onDestroy(() => unlisten.forEach((u) => u()));
+  onDestroy(() => listeners.dispose());
 
   async function send() {
     const text = draft.trim();
     if (!text || chat.streaming) return;
-    choice = null;
+    onchoice(null);
     chat = pushUser(chat, text);
+    const optimistic = chat.items[chat.items.length - 1].key;
     draft = "";
     await scrollDown();
     try {
       await api.sendMessage(conversation.id, text, provider);
     } catch (e) {
-      chat = pushNotice(stopWorking(chat), errorText(e));
+      // Not sent: take the message back and give the text back to the user.
+      chat = dropItem(chat, optimistic);
+      if (!draft) draft = text;
+      onerror(errorText(e));
     }
   }
 
   async function pick(p: ProviderId) {
     if (!choice) return;
-    const id = choice.userMessageId;
-    choice = null;
+    const c = choice;
+    onchoice(null);
     chat = { ...chat, streaming: true };
     try {
-      await api.continueWith(conversation.id, id, p);
+      await api.continueWith(conversation.id, c.userMessageId, p);
     } catch (e) {
       chat = pushNotice(stopWorking(chat), errorText(e));
+      onchoice(c);
     }
   }
 
