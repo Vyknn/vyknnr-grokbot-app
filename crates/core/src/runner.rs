@@ -43,6 +43,8 @@ pub struct RunResult {
 }
 
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// How long to wait for powershell.exe to exit after it was killed.
+const KILL_WAIT: Duration = Duration::from_secs(10);
 const PREFIX: &str =
     "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; ";
 
@@ -140,6 +142,12 @@ pub(crate) async fn kill_tree(pid: Option<u32>) {
     }
 }
 
+/// Run `command` in a fresh `powershell.exe` in `cwd`, streaming output to
+/// `on_chunk`, until it exits, `limits.timeout` passes, or `cancel` fires.
+///
+/// Callers must stop a run by cancelling `cancel`: that kills the whole
+/// process tree. Dropping the returned future only kills powershell.exe
+/// itself (`kill_on_drop`); programs it started keep running.
 pub async fn run_powershell(
     command: &str,
     cwd: &Path,
@@ -200,7 +208,9 @@ pub async fn run_powershell(
 
     if timed_out || cancelled {
         kill_tree(pid).await;
-        let _ = child.wait().await;
+        // Backstop in case taskkill failed; never wait forever.
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(KILL_WAIT, child.wait()).await;
     }
 
     // Drain remaining output; bounded in case a surviving grandchild holds the pipes.
