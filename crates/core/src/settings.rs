@@ -1,5 +1,5 @@
 use crate::decision::policy::Thresholds;
-use crate::providers::hermes::DEFAULT_ALLOWED_TOOLSETS;
+use crate::providers::hermes::{is_never_allowed_toolset, DEFAULT_ALLOWED_TOOLSETS};
 use crate::ProviderId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -125,6 +125,18 @@ impl Settings {
         };
         if !loopback {
             return Err("hermes_base_url ต้องเป็นที่อยู่ loopback (127.0.0.1, localhost, ::1)".into());
+        }
+        let forbidden: Vec<&str> = self
+            .hermes_allowed_toolsets
+            .iter()
+            .map(|t| t.trim())
+            .filter(|t| is_never_allowed_toolset(t))
+            .collect();
+        if !forbidden.is_empty() {
+            return Err(format!(
+                "hermes_allowed_toolsets ห้ามมี toolset ที่รันคำสั่งหรือแตะไฟล์เอง: {}",
+                forbidden.join(", ")
+            ));
         }
         parse_http_url("anthropic_base_url", &self.anthropic_base_url)?;
         parse_http_url("jev_base_url", &self.jev_base_url)?;
@@ -416,6 +428,42 @@ mod tests {
         assert!(s.validate().is_ok());
         s.hermes_base_url = "http://localhost:8642/v1".into();
         assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_never_allowed_hermes_toolsets() {
+        for bad in [
+            "terminal",
+            "code_execution",
+            "file",
+            "computer_use",
+            "desktop_ui",
+            "browser",
+            "coding",
+            "debugging",
+            "cronjob",
+            "connections",
+            "catalog",
+            "delegation",
+            "skills",
+            "all",
+            "*",
+            "hermes-cli",
+            " Terminal ",
+            "HERMES-api-server",
+        ] {
+            let mut s = Settings::default();
+            s.hermes_allowed_toolsets.push(bad.into());
+            let e = s.validate().expect_err(bad);
+            assert!(e.contains(bad.trim()), "{bad}: {e}");
+            assert!(e.contains("hermes_allowed_toolsets"), "{e}");
+        }
+        let mut s = Settings::default();
+        s.hermes_allowed_toolsets = vec!["web".into(), "terminal".into(), "file".into()];
+        assert_eq!(
+            s.validate().unwrap_err(),
+            "hermes_allowed_toolsets ห้ามมี toolset ที่รันคำสั่งหรือแตะไฟล์เอง: terminal, file"
+        );
     }
 
     #[test]

@@ -27,6 +27,8 @@
   let toolsetsText = $state("");
   let saving = $state(false);
   let saved = $state("");
+  // Validation errors from the backend, shown next to the save button.
+  let saveError = $state("");
   let snippet: string | null = $state(null);
   let copied = $state(false);
 
@@ -61,6 +63,7 @@
     if (!s) return;
     saving = true;
     saved = "";
+    saveError = "";
     try {
       const next: Settings = {
         ...s,
@@ -76,7 +79,7 @@
       snippet = null;
       onrefreshstatus();
     } catch (e) {
-      onerror(errorText(e));
+      saveError = errorText(e);
     } finally {
       saving = false;
     }
@@ -227,6 +230,9 @@
         <button type="submit" class="primary" disabled={saving}>{saving ? "กำลังบันทึก…" : "บันทึกการตั้งค่า"}</button>
         <span class="saved">{saved}</span>
       </div>
+      {#if saveError}
+        <p class="save-error" role="alert">{saveError}</p>
+      {/if}
     </form>
 
     <h2>เชื่อม Hermes</h2>
@@ -373,6 +379,11 @@
   .saved {
     color: var(--ok);
     font-size: 0.84rem;
+  }
+  .save-error {
+    color: var(--danger);
+    font-size: 0.84rem;
+    margin: 6px 0 0;
   }
   .link {
     border: 0;

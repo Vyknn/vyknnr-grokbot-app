@@ -422,6 +422,33 @@ async fn allowlist_rejects_composites_presets_and_unknown_names() {
 }
 
 #[tokio::test]
+async fn never_allowed_toolset_offends_even_if_allowlisted() {
+    let r = rig(CommandVerdict::AutoRun, ApprovalResponse::Deny).await;
+    mount_health(&r.server).await;
+    mount_toolsets(
+        &r.server,
+        json!([{"name":"web","enabled":true},{"name":"terminal","enabled":true},{"name":"hermes-cli","enabled":true},{"name":"file","enabled":false}]),
+    )
+    .await;
+    let p = HermesProvider::new(
+        Url::parse(&format!("{}/v1/", r.server.uri())).unwrap(),
+        Some(API_KEY.into()),
+        r.mcp.clone(),
+        r.commands.clone(),
+        vec![
+            "web".into(),
+            "Terminal".into(),
+            "hermes-cli".into(),
+            "file".into(),
+        ],
+    );
+    assert_eq!(
+        p.availability().await,
+        Availability::Unavailable("ต้องปิด toolset: terminal, hermes-cli".into())
+    );
+}
+
+#[tokio::test]
 async fn allowlist_ready_cases() {
     let cases = [
         json!([{"name":"web","enabled":true},{"name":"memory","enabled":true},{"name":"terminal","enabled":false},{"name":"coding","enabled":false}]),

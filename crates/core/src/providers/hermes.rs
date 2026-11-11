@@ -47,6 +47,35 @@ pub const DEFAULT_ALLOWED_TOOLSETS: &[&str] = &[
     "assistant",
 ];
 
+/// Toolsets that run commands, touch files, drive the desktop or bundle such
+/// tools. They may never be enabled, even if a user puts them in the
+/// allowlist. Any name starting with `hermes-` (platform presets) is treated
+/// the same way; see [`is_never_allowed_toolset`].
+pub const HERMES_NEVER_ALLOWED: &[&str] = &[
+    "terminal",
+    "code_execution",
+    "file",
+    "computer_use",
+    "desktop_ui",
+    "browser",
+    "coding",
+    "debugging",
+    "cronjob",
+    "connections",
+    "catalog",
+    "delegation",
+    "skills",
+    "all",
+    "*",
+];
+
+/// True for [`HERMES_NEVER_ALLOWED`] names and `hermes-*` presets
+/// (case-insensitive, surrounding whitespace ignored).
+pub fn is_never_allowed_toolset(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    n.starts_with("hermes-") || HERMES_NEVER_ALLOWED.contains(&n.as_str())
+}
+
 const INSTRUCTIONS: &str = "Use the run_command tool from the assistant MCP server for any shell command. Commands are reviewed and may be denied by the user.";
 
 const NO_KEY: &str = "ยังไม่ได้ตั้ง API key ของ Hermes";
@@ -323,7 +352,10 @@ impl HermesProvider {
             .collect();
         let offending: Vec<&str> = toolsets
             .iter()
-            .filter(|(name, on)| *on && !allowed.contains(&name.trim().to_ascii_lowercase()))
+            .filter(|(name, on)| {
+                *on && (is_never_allowed_toolset(name)
+                    || !allowed.contains(&name.trim().to_ascii_lowercase()))
+            })
             .map(|(name, _)| name.as_str())
             .collect();
         if offending.is_empty() {
